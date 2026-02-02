@@ -1,0 +1,23 @@
+# Node modules
+node_modules/
+.npm-cache/
+
+# 環境変数
+.env
+.env.local
+config/ms-id-token.txt
+
+# ログファイル
+*.log
+
+# OS固有
+.DS_Store
+Thumbs.db
+
+# エディタ固有
+.vscode/
+.idea/
+
+# ビルド成果物
+dist/
+build/

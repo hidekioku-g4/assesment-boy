@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir \"%APPDATA%\")",
+      "Bash(findstr:*)",
+      "Bash(npm run client:build:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm run:*)",
+      "Bash(node --check:*)",
+      "Bash(tasklist:*)",
+      "WebSearch",
+      "Bash(npx electron .)",
+      "Bash(netstat:*)",
+      "Bash(taskkill:*)",
+      "Bash(cmd //c \"taskkill /PID 13652 /F\")",
+      "Bash(cmd //c \"taskkill /PID 20420 /F\")",
+      "Bash(cmd //c \"taskkill /IM electron.exe /F\")",
+      "Bash(node server/server.js:*)",
+      "Bash(npx tsc:*)",
+      "Bash(cmd //c \"taskkill /IM node.exe /F\")",
+      "Bash(npm install:*)",
+      "Bash(curl:*)",
+      "Bash(node:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(dir:*)",
+      "WebFetch(domain:booth.pm)",
+      "Bash(npm ls:*)",
+      "Bash(npm view:*)",
+      "Bash(more:*)",
+      "Bash(cmd /c \"taskkill /PID 5100 /F\")",
+      "Bash(powershell -Command:*)",
+      "WebFetch(domain:cdn.jsdelivr.net)",
+      "WebFetch(domain:github.com)"
+    ]
+  }
+}
