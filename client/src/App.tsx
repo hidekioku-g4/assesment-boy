@@ -935,6 +935,7 @@ function ChatPanel({
   initialMessage = null,
   userInfo = {},
   msAccountId = '',
+  prepareVoice = false,
 }: {
   className?: string;
   disableVoice?: boolean;
@@ -943,6 +944,7 @@ function ChatPanel({
   initialMessage?: string | null;
   userInfo?: { name?: string };
   msAccountId?: string;
+  prepareVoice?: boolean;
 }) {
   const initialStorageKey = getChatStorageKey();
   const storageKeyRef = useRef(initialStorageKey);
@@ -1270,7 +1272,6 @@ function ChatPanel({
     // セッションID生成
     sessionIdRef.current = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     lastSavedMessageCountRef.current = 0;
-    setChatStarted(true);
 
     // 議題提案またはデフォルトメッセージを表示
     const messageText = initialMessage || 'はじめまして！今日からよろしくお願いします。もしよかったら、あなたのことを教えていただけますか？好きなことや趣味、どんなことに興味があるかなど、何でも大丈夫です！';
@@ -1280,6 +1281,9 @@ function ChatPanel({
       text: messageText,
     };
     setMessages([agendaMessage]);
+
+    setChatStarted(true);
+
     // AIメッセージを読み上げ
     speakReply(messageText);
   }, [initialMessage, speakReply]);
@@ -2134,15 +2138,12 @@ function ChatPanel({
     }
   }, [completeVoiceTranscript, disableVoice, finalizeVoiceCapture, status, voiceStatus, voiceSupported]);
 
-  // チャット開始時に音声入力を自動開始
+  // 事前準備フラグがtrueになったら音声キャプチャを開始（最初のスタートボタン押下時）
   useEffect(() => {
-    if (chatStarted && voiceSupported && !disableVoice && voiceStatus === 'idle') {
-      const timer = setTimeout(() => {
-        startVoiceCapture();
-      }, 1000); // AIの読み上げが始まってから少し待つ
-      return () => clearTimeout(timer);
+    if (prepareVoice && voiceSupported && !disableVoice && voiceStatus === 'idle') {
+      startVoiceCapture();
     }
-  }, [chatStarted, voiceSupported, disableVoice, voiceStatus, startVoiceCapture]);
+  }, [prepareVoice, voiceSupported, disableVoice, voiceStatus, startVoiceCapture]);
 
   const canSend = chatStarted && status !== 'running' && input.trim().length > 0;
   const voiceButtonLabel =
@@ -2866,6 +2867,8 @@ export default function App() {
   const [facilitatorId, setFacilitatorId] = useState('');
   const [talentId, setTalentId] = useState('');
   const [isInitialSetupOpen, setIsInitialSetupOpen] = useState(false);
+  const [isWelcomeLoading, setIsWelcomeLoading] = useState(false);
+  const [voicePrepared, setVoicePrepared] = useState(false);
   const [initialSetupDraft, setInitialSetupDraft] = useState({
     mode: 'online' as 'online' | 'offline',
     meetingTypeId: meetingTypeId ?? '',
@@ -6753,6 +6756,7 @@ useEffect(() => {
                   initialMessage={agendaSuggestion}
                   userInfo={{ name: msAccount?.name || msAccount?.username || '' }}
                   msAccountId={msAccount?.homeAccountId || msAccount?.localAccountId || ''}
+                  prepareVoice={voicePrepared}
                 />
               </section>
             )}
@@ -6783,7 +6787,10 @@ useEffect(() => {
 
             <Button
               onClick={async () => {
+                setIsWelcomeLoading(true);
                 setAudioSource('mic');
+                // 音声準備を開始（Deepgram接続）
+                setVoicePrepared(true);
                 // 議題提案を取得（待ってから画面を開く）
                 const msAccountId = msAccount?.homeAccountId || msAccount?.localAccountId || '';
                 if (msAccountId) {
@@ -6809,11 +6816,20 @@ useEffect(() => {
                   }
                 }
                 // 議題提案取得後に画面を開く
+                setIsWelcomeLoading(false);
                 setIsInitialSetupOpen(false);
               }}
               className="px-12 py-4 text-lg"
+              disabled={isWelcomeLoading}
             >
-              スタート
+              {isWelcomeLoading ? (
+                <span className="flex items-center gap-2">
+                  <span className="animate-spin rounded-full h-5 w-5 border-b-2 border-white" />
+                  準備中...
+                </span>
+              ) : (
+                'スタート'
+              )}
             </Button>
           </div>
         </div>
