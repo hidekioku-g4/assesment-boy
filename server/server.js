@@ -14,11 +14,14 @@ import { getAgendaPrompt } from './prompts/agenda.js';
 import { getSupportRecordDraftPrompt } from './prompts/support-record-draft.js';
 import { getSupportRecordRefinePrompt } from './prompts/support-record-refine.js';
 import { getInterviewFeedbackPrompt } from './prompts/interview-feedback.js';
-import { getChatPrompt } from './prompts/chat.js';
+import { getChatPrompt, getChatSystemInstruction, buildGeminiContents, buildCurrentUserMessage } from './prompts/chat.js';
 import { getSessionSummaryPrompt, getAgendaSuggestionPrompt } from './prompts/session-summary.js';
 import { getFaceFeedbackPrompt } from './prompts/face-feedback.js';
 import { getMetaSummaryPrompt } from './prompts/meta-summary.js';
 import { fetchParticipants, insertSupportRecord, insertSessionSummary, fetchSessionSummaries, fetchUserProfile, upsertUserProfile, countSessionSummaries, fetchSuggestedTopics } from './bigquery.js';
+import { synthesize as ttsSynthesize, getVoices as ttsGetVoices } from './tts/index.js';
+import { preprocessTtsText, warmupTokenizer } from './tts/preprocess.js';
+import { synthesizeStream as ttsStream, warmup as ttsWarmup, STREAM_SAMPLE_RATE } from './tts/cartesia-stream.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -70,14 +73,8 @@ const SUBJECT_TOKEN_FILE =
   process.env.WIF_SUBJECT_TOKEN_FILE ||
   path.join(APP_DATA_DIR, 'config', 'ms-id-token.txt');
 
-const TTS_VOICE_NAME = process.env.TTS_VOICE_NAME || 'ja-JP-Neural2-B';
-const TTS_LANGUAGE_CODE = process.env.TTS_LANGUAGE_CODE || 'ja-JP';
-const TTS_AUDIO_ENCODING = process.env.TTS_AUDIO_ENCODING || 'MP3';
-const TTS_SPEAKING_RATE = Number(process.env.TTS_SPEAKING_RATE ?? 1.25);
-const TTS_PITCH = Number(process.env.TTS_PITCH ?? 0);
 const TTS_MAX_CHARS = Number(process.env.TTS_MAX_CHARS ?? 4000);
 
-let ttsClientPromise = null;
 const resolveCredentialPath = (value) => {
   if (!value) return undefined;
   return path.isAbsolute(value) ? value : path.join(process.cwd(), value);
@@ -101,34 +98,6 @@ const persistSubjectToken = async (token) => {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, token, 'utf8');
   return filePath;
-};
-const getTtsClient = async () => {
-  if (!ttsClientPromise) {
-    ttsClientPromise = import('@google-cloud/text-to-speech')
-      .then((mod) => {
-        const Client = mod.TextToSpeechClient || mod.default?.TextToSpeechClient;
-        if (!Client) {
-          throw new Error('TextToSpeechClient not found');
-        }
-        const keyFilename = resolveCredentialPath(
-          process.env.GCP_WIF_CREDENTIALS || process.env.GOOGLE_APPLICATION_CREDENTIALS || '',
-        );
-        const projectId =
-          process.env.GCP_PROJECT_ID ||
-          process.env.GOOGLE_CLOUD_PROJECT ||
-          process.env.BQ_PROJECT_ID ||
-          undefined;
-        const options = {};
-        if (keyFilename) {
-          options.keyFilename = keyFilename;
-        }
-        if (projectId) {
-          options.projectId = projectId;
-        }
-        return new Client(options);
-      });
-  }
-  return ttsClientPromise;
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -184,6 +153,26 @@ const summarizeGeminiError = (error) => {
     lower.includes('stage1 response was empty') ||
     lower.includes('stage2 response was empty');
   return { retryable, status, code, reason, message };
+};
+
+// --- プロフィールキャッシュ（BQ呼び出しを毎メッセージ避ける） ---
+const profileCache = new Map(); // key: msAccountId → { profile, fetchedAt }
+const PROFILE_CACHE_TTL_MS = 10 * 60 * 1000; // 10分
+
+const getCachedProfile = async (msAccountId) => {
+  if (!msAccountId) return null;
+  const cached = profileCache.get(msAccountId);
+  if (cached && Date.now() - cached.fetchedAt < PROFILE_CACHE_TTL_MS) {
+    return cached.profile;
+  }
+  try {
+    const profile = await fetchUserProfile({ msAccountId });
+    profileCache.set(msAccountId, { profile, fetchedAt: Date.now() });
+    return profile;
+  } catch (err) {
+    console.warn('[profile-cache] fetch failed, continuing without profile:', err?.message);
+    return null;
+  }
 };
 
 const generateGeminiContent = async (payload, label = 'gemini') => {
@@ -1016,6 +1005,8 @@ app.post('/api/chat', async (req, res) => {
   const rawHistory = Array.isArray(req.body?.history) ? req.body.history : [];
   const context = typeof req.body?.context === 'string' ? req.body.context : '';
   const userInfo = typeof req.body?.userInfo === 'object' && req.body.userInfo ? req.body.userInfo : {};
+  const faceAnalysis = typeof req.body?.faceAnalysis === 'object' && req.body.faceAnalysis ? req.body.faceAnalysis : null;
+  const msAccountId = typeof req.body?.msAccountId === 'string' ? req.body.msAccountId : '';
   const maxMessages = Number(process.env.CHAT_HISTORY_MAX_MESSAGES ?? 9999);
   const maxChars = Number(process.env.CHAT_HISTORY_MESSAGE_CHARS ?? 800);
   const maxContextChars = Number(process.env.CHAT_CONTEXT_MAX_CHARS ?? 4000);
@@ -1034,11 +1025,18 @@ app.post('/api/chat', async (req, res) => {
   console.log(`[chat] start (len:${message.length}, history:${history.length}, context:${trimmedContext.length}, user:${userInfo.name || 'unknown'})`);
 
   try {
-    const prompt = getChatPrompt(message, history, trimmedContext, userInfo);
+    const userProfile = await getCachedProfile(msAccountId);
+    const systemInstruction = getChatSystemInstruction(userInfo, { userProfile, historyLength: history.length });
+    const contents = [
+      ...buildGeminiContents(history),
+      buildCurrentUserMessage(message, trimmedContext, faceAnalysis),
+    ];
+
     const geminiStart = Date.now();
     const result = await generateGeminiContent({
       model: DEFAULT_GEMINI_MODEL,
-      contents: [{ role: 'user', parts: [{ text: prompt }]}],
+      config: { systemInstruction },
+      contents,
     }, 'chat');
     const geminiEnd = Date.now();
     let reply = (result.text ?? '').trim();
@@ -1074,6 +1072,7 @@ app.post('/api/chat-stream', async (req, res) => {
   const context = typeof req.body?.context === 'string' ? req.body.context : '';
   const userInfo = typeof req.body?.userInfo === 'object' && req.body.userInfo ? req.body.userInfo : {};
   const faceAnalysis = typeof req.body?.faceAnalysis === 'object' && req.body.faceAnalysis ? req.body.faceAnalysis : null;
+  const msAccountId = typeof req.body?.msAccountId === 'string' ? req.body.msAccountId : '';
   const maxMessages = Number(process.env.CHAT_HISTORY_MAX_MESSAGES ?? 9999);
   const maxChars = Number(process.env.CHAT_HISTORY_MESSAGE_CHARS ?? 800);
   const maxContextChars = Number(process.env.CHAT_CONTEXT_MAX_CHARS ?? 4000);
@@ -1097,12 +1096,18 @@ app.post('/api/chat-stream', async (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
 
   try {
-    const prompt = getChatPrompt(message, history, trimmedContext, userInfo, faceAnalysis);
+    const userProfile = await getCachedProfile(msAccountId);
+    const systemInstruction = getChatSystemInstruction(userInfo, { userProfile, historyLength: history.length });
+    const contents = [
+      ...buildGeminiContents(history),
+      buildCurrentUserMessage(message, trimmedContext, faceAnalysis),
+    ];
     const geminiStart = Date.now();
 
     const stream = await genAI.models.generateContentStream({
       model: DEFAULT_GEMINI_MODEL,
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: { systemInstruction },
+      contents,
     });
 
     let fullText = '';
@@ -1162,49 +1167,9 @@ app.post('/api/ms-subject-token', async (req, res) => {
   }
 });
 
-// 利用可能なTTS音声オプション
-const TTS_VOICE_OPTIONS = [
-  { id: 'ja-JP-Neural2-B', name: 'Neural2-B (女性・標準)', gender: 'FEMALE' },
-  { id: 'ja-JP-Neural2-C', name: 'Neural2-C (男性)', gender: 'MALE' },
-  { id: 'ja-JP-Neural2-D', name: 'Neural2-D (男性・低め)', gender: 'MALE' },
-  { id: 'ja-JP-Wavenet-A', name: 'Wavenet-A (女性)', gender: 'FEMALE' },
-  { id: 'ja-JP-Wavenet-B', name: 'Wavenet-B (女性・落ち着き)', gender: 'FEMALE' },
-  { id: 'ja-JP-Wavenet-C', name: 'Wavenet-C (男性)', gender: 'MALE' },
-  { id: 'ja-JP-Wavenet-D', name: 'Wavenet-D (男性・落ち着き)', gender: 'MALE' },
-  { id: 'ja-JP-Standard-A', name: 'Standard-A (女性・軽量)', gender: 'FEMALE' },
-  { id: 'ja-JP-Standard-B', name: 'Standard-B (女性)', gender: 'FEMALE' },
-  { id: 'ja-JP-Standard-C', name: 'Standard-C (男性)', gender: 'MALE' },
-  { id: 'ja-JP-Standard-D', name: 'Standard-D (男性)', gender: 'MALE' },
-];
-
 app.get('/api/tts/voices', (req, res) => {
-  res.json({ voices: TTS_VOICE_OPTIONS, default: TTS_VOICE_NAME });
+  res.json(ttsGetVoices());
 });
-
-// TTS読み上げ用の単語置換辞書（読み間違え対策）
-// キー: 元の単語, 値: 読み上げ用のテキスト（ひらがな/カタカナ推奨）
-const TTS_PRONUNCIATION_MAP = {
-  // 例: 'Thankslab': 'サンクスラボ',
-  // 例: 'アセス君': 'アセスくん',
-};
-
-const preprocessTtsText = (text) => {
-  let result = text;
-
-  // 読み仮名付きの名前を処理: 山田太郎《やまだたろう》 → やまだたろう
-  // 漢字・ひらがな・カタカナの連続 + 《読み仮名》 → 読み仮名に置き換え
-  const beforeFurigana = result;
-  result = result.replace(/[\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FFー]+《([^》]+)》/g, '$1');
-  if (beforeFurigana !== result) {
-    console.log(`[tts] furigana処理: "${beforeFurigana.slice(0, 80)}" → "${result.slice(0, 80)}"`);
-  }
-
-  // 辞書による置換
-  for (const [word, pronunciation] of Object.entries(TTS_PRONUNCIATION_MAP)) {
-    result = result.replaceAll(word, pronunciation);
-  }
-  return result;
-};
 
 app.post('/api/tts', async (req, res) => {
   const raw = typeof req.body?.text === 'string' ? req.body.text : '';
@@ -1216,59 +1181,20 @@ app.post('/api/tts', async (req, res) => {
     return res.status(400).json({ error: 'text is required' });
   }
 
-  // クライアントからspeakingRateを受け取る（0.5〜2.0の範囲でクランプ）
   const requestedRate = Number(req.body?.speakingRate);
-  const speakingRate = Number.isFinite(requestedRate) && requestedRate > 0
+  const speed = Number.isFinite(requestedRate) && requestedRate > 0
     ? Math.max(0.5, Math.min(2.0, requestedRate))
-    : TTS_SPEAKING_RATE;
-
-  // クライアントから音声タイプを受け取る（許可リストでバリデーション）
-  const requestedVoice = typeof req.body?.voice === 'string' ? req.body.voice.trim() : '';
-  const isValidVoice = TTS_VOICE_OPTIONS.some(v => v.id === requestedVoice);
-  const voiceName = isValidVoice ? requestedVoice : TTS_VOICE_NAME;
-  console.log(`[tts] voice selection: requested="${requestedVoice}", valid=${isValidVoice}, using="${voiceName}"`);
-
-  // ピッチも受け取れるように（-20.0〜20.0）
+    : undefined;
+  const requestedVoice = typeof req.body?.voice === 'string' ? req.body.voice.trim() : undefined;
   const requestedPitch = Number(req.body?.pitch);
   const pitch = Number.isFinite(requestedPitch)
     ? Math.max(-20, Math.min(20, requestedPitch))
-    : TTS_PITCH;
+    : undefined;
 
-  const startTime = Date.now();
-  console.log(`[tts] start (len:${text.length}, rate:${speakingRate}, voice:${voiceName}, pitch:${pitch})`);
+  console.log(`[tts] start (len:${text.length}, speed:${speed}, voice:${requestedVoice}, pitch:${pitch})`);
 
   try {
-    const client = await getTtsClient();
-    const clientReady = Date.now();
-    const audioConfig = {
-      audioEncoding: TTS_AUDIO_ENCODING,
-    };
-    if (Number.isFinite(speakingRate) && speakingRate > 0) {
-      audioConfig.speakingRate = speakingRate;
-    }
-    if (Number.isFinite(pitch)) {
-      audioConfig.pitch = pitch;
-    }
-    const [response] = await client.synthesizeSpeech({
-      input: { text },
-      voice: { languageCode: TTS_LANGUAGE_CODE, name: voiceName },
-      audioConfig,
-    });
-    const synthesizeEnd = Date.now();
-    const audioContent = response?.audioContent;
-    if (!audioContent) {
-      throw new Error('tts_empty');
-    }
-    const buffer = Buffer.isBuffer(audioContent)
-      ? audioContent
-      : Buffer.from(audioContent, 'base64');
-    const contentType =
-      TTS_AUDIO_ENCODING === 'MP3'
-        ? 'audio/mpeg'
-        : TTS_AUDIO_ENCODING === 'OGG_OPUS'
-          ? 'audio/ogg'
-          : 'audio/wav';
-    console.log(`[tts] done - Client: ${clientReady - startTime}ms, Synthesize: ${synthesizeEnd - clientReady}ms, Total: ${Date.now() - startTime}ms`);
+    const { buffer, contentType } = await ttsSynthesize(text, { speed, voice: requestedVoice, pitch });
     res.setHeader('Content-Type', contentType);
     res.send(buffer);
   } catch (error) {
@@ -1277,6 +1203,62 @@ app.post('/api/tts', async (req, res) => {
     const isAuthError = /invalid_grant|stale|missing_subject_token|expired/i.test(message);
     console.error('[tts] failed', message);
     res.status(isAuthError ? 401 : 500).json({ error: 'tts_failed', message, code });
+  }
+});
+
+// ストリーミング TTS（SSE、低レイテンシ）
+app.post('/api/tts-stream', async (req, res) => {
+  const raw = typeof req.body?.text === 'string' ? req.body.text : '';
+  const text = raw.trim();
+  if (!text) {
+    return res.status(400).json({ error: 'text is required' });
+  }
+  if (!process.env.CARTESIA_API_KEY) {
+    return res.status(500).json({ error: 'CARTESIA_API_KEY not configured' });
+  }
+
+  const requestedRate = Number(req.body?.speakingRate);
+  const speed = Number.isFinite(requestedRate) && requestedRate > 0
+    ? Math.max(0.5, Math.min(2.0, requestedRate))
+    : undefined;
+  const voice = typeof req.body?.voice === 'string' ? req.body.voice.trim() : undefined;
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  // サンプルレート情報を最初に送る
+  res.write(`data: ${JSON.stringify({ type: 'info', sampleRate: STREAM_SAMPLE_RATE })}\n\n`);
+
+  try {
+    await ttsStream(text, {
+      speed,
+      voice,
+      onChunk: (base64Data) => {
+        if (!res.destroyed) {
+          res.write(`data: ${JSON.stringify({ type: 'audio', data: base64Data })}\n\n`);
+        }
+      },
+      onDone: () => {
+        if (!res.destroyed) {
+          res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+          res.end();
+        }
+      },
+      onError: (err) => {
+        if (!res.destroyed) {
+          res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+          res.end();
+        }
+      },
+    });
+  } catch (err) {
+    console.error('[tts-stream] failed', err.message);
+    if (!res.destroyed) {
+      res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+      res.end();
+    }
   }
 });
 
@@ -2054,6 +2036,12 @@ const startServer = (port, attemptsLeft) => {
         : port;
     process.env.PORT = String(actualPort);
     console.log(`[server] listening on http://localhost:${actualPort}`);
+    // kuromoji 形態素解析器を初期化
+    warmupTokenizer().catch(() => {});
+    // Cartesia WebSocket をプリウォーム（起動直後に接続しておく）
+    if (process.env.CARTESIA_API_KEY) {
+      ttsWarmup().catch(() => {});
+    }
   });
 };
 

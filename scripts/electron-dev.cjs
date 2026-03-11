@@ -1,4 +1,4 @@
-﻿const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const path = require('path');
 const http = require('http');
 const dotenv = require('dotenv');
@@ -11,8 +11,47 @@ const electronCmd = isWin
   ? npmCmd
   : path.join(__dirname, '..', 'node_modules', '.bin', 'electron');
 
-const VITE_PORT = 5173;
+const VITE_PORT = 5212;
 const SERVER_PORT = process.env.PORT || 37212;
+
+/**
+ * 指定ポートを使用しているプロセスを強制終了（起動前のクリーンアップ）
+ */
+function killProcessOnPort(port) {
+  try {
+    if (isWin) {
+      const out = execSync(`netstat -ano | findstr ":${port}" | findstr "LISTEN"`, { encoding: 'utf8' });
+      const pids = new Set(out.split('\n').map(l => l.trim().split(/\s+/).pop()).filter(Boolean).filter(p => p !== '0'));
+      for (const pid of pids) {
+        try {
+          execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' });
+          console.log(`[electron-dev] Killed PID ${pid} on port ${port}`);
+        } catch { /* already dead */ }
+      }
+    } else {
+      execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
+    }
+  } catch { /* no process on port */ }
+}
+
+/**
+ * プロセスツリーごと強制終了（Windows は kill() だと子プロセスが残る）
+ */
+function killTree(child) {
+  if (!child || child.killed) return;
+  try {
+    if (isWin && child.pid) {
+      execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' });
+    } else {
+      child.kill('SIGTERM');
+    }
+  } catch { /* already dead */ }
+}
+
+// 起動前に既存プロセスをクリーンアップ
+console.log('[electron-dev] Cleaning up existing processes...');
+killProcessOnPort(SERVER_PORT);
+killProcessOnPort(VITE_PORT);
 
 const env = {
   ...process.env,
@@ -59,6 +98,7 @@ const startElectron = async () => {
     console.log('[electron-dev] Vite server ready, starting Electron...');
   } catch (err) {
     console.error('[electron-dev] Failed to start Vite:', err.message);
+    cleanup();
     process.exit(1);
   }
 
@@ -66,9 +106,9 @@ const startElectron = async () => {
   const electron = spawn(electronCmd, electronArgs, spawnOpts);
 
   const cleanup = () => {
-    if (!server.killed) server.kill();
-    if (!vite.killed) vite.kill();
-    if (!electron.killed) electron.kill();
+    killTree(server);
+    killTree(vite);
+    killTree(electron);
   };
 
   electron.on('exit', (code) => {
@@ -81,4 +121,3 @@ const startElectron = async () => {
 };
 
 startElectron();
-

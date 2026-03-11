@@ -1,5 +1,5 @@
 {
-    "name": "meeting-tool-v2",
+    "name": "assess-kun",
     "version": "0.1.1",
     "private": true,
     "type": "module",
@@ -27,7 +27,10 @@
         "electron:dev": "node scripts/electron-dev.cjs",
         "electron": "electron .",
         "dist:portable": "npm run client:build && electron-builder --win portable",
-        "dist": "npm run dist:portable"
+        "dist": "npm run dist:portable",
+        "restart": "node scripts/restart-electron.cjs",
+        "kill": "node scripts/restart-electron.cjs --kill-only",
+        "verify-build": "node scripts/verify-build.cjs"
     },
     "dependencies": {
         "@azure/msal-browser": "^4.27.0",
@@ -46,6 +49,7 @@
         "clsx": "^2.1.1",
         "dotenv": "^16.4.5",
         "express": "^4.19.2",
+        "kuromoji": "^0.1.2",
         "lucide-react": "^0.546.0",
         "pixi-live2d-display": "^0.4.0",
         "pixi.js": "^6.5.10",

@@ -935,6 +935,7 @@ function ChatPanel({
   initialMessage = null,
   userInfo = {},
   msAccountId = '',
+  prepareVoice = false,
 }: {
   className?: string;
   disableVoice?: boolean;
@@ -943,6 +944,7 @@ function ChatPanel({
   initialMessage?: string | null;
   userInfo?: { name?: string };
   msAccountId?: string;
+  prepareVoice?: boolean;
 }) {
   const initialStorageKey = getChatStorageKey();
   const storageKeyRef = useRef(initialStorageKey);
@@ -962,8 +964,8 @@ function ChatPanel({
   const [voicePreview, setVoicePreview] = useState('');
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [ttsEnabled, setTtsEnabled] = useState(true);
-  const [ttsSpeed, setTtsSpeed] = useState(1.0);
-  const [ttsVoice, setTtsVoice] = useState('ja-JP-Neural2-C');
+  const [ttsSpeed, setTtsSpeed] = useState(1.5);
+  const [ttsVoice, setTtsVoice] = useState('59d4fd2f-f5eb-4410-8105-58db7661144f'); // Yuki
   const [ttsVoiceOptions, setTtsVoiceOptions] = useState<{ id: string; name: string }[]>([]);
   const [ttsSpeaking, setTtsSpeaking] = useState(false);
   const [ttsError, setTtsError] = useState<string | null>(null);
@@ -1000,6 +1002,16 @@ function ChatPanel({
     }
     return { expression: 'neutral', cleanText: text };
   }, []);
+
+  // 読み仮名を除去（UI表示用）: 漢字《ふりがな》 → 漢字
+  const stripFurigana = useCallback((text: string): string => {
+    // 完全な《ふりがな》を除去
+    let result = text.replace(/《[^》]*》/g, '');
+    // ストリーミング中の不完全な《... を末尾から除去
+    result = result.replace(/《[^》]*$/, '');
+    return result;
+  }, []);
+
   // 入力モード: 'auto-smart'(1.5秒+文末), 'auto-slow'(2秒), 'manual'(手動), 'typing'(タイピングのみ)
   const [inputMode, setInputMode] = useState<'auto-smart' | 'auto-slow' | 'manual' | 'typing'>('auto-smart');
   const endRef = useRef<HTMLDivElement | null>(null);
@@ -1061,6 +1073,12 @@ function ChatPanel({
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages, status]);
 
+  // ストリーミングTTS用 refs（stopAllTts より先に宣言）
+  const ttsAudioCtxRef = useRef<AudioContext | null>(null);
+  const ttsStreamAbortRef = useRef<AbortController | null>(null);
+  const ttsRequestIdRef = useRef(0);
+  const ttsQueueRef = useRef<string[]>([]); // 残りテキストのキュー
+
   // 全ての音声を停止するヘルパー関数
   const stopAllTts = useCallback(() => {
     // ブラウザTTSを停止
@@ -1090,165 +1108,180 @@ function ChatPanel({
       }
       ttsAudioUrlRef.current = null;
     }
+    // ストリーミングTTSを中断（AudioContextは再利用するので close しない）
+    ttsStreamAbortRef?.current?.abort();
+    ttsStreamAbortRef.current = null;
+    ttsQueueRef.current = [];
     ttsSpeakingRef.current = false;
     setTtsSpeaking(false);
   }, []);
 
   const speakReply = useCallback(
-    (text: string) => {
+    (text: string, options?: { append?: boolean }) => {
       if (!ttsEnabled) return;
+
+      // append モード: 現在再生中のTTSが終わったら次を再生するキューに追加
+      if (options?.append) {
+        ttsQueueRef.current.push(text);
+        console.log(`[tts:queue] enqueued ${text.length} chars, queue size: ${ttsQueueRef.current.length}`);
+        return;
+      }
+
       setTtsError(null);
 
-      // 必ず全ての音声を停止してから新しい音声を開始
+      // 全ての音声を停止
       stopAllTts();
+      // ストリーミング中の前リクエストをキャンセル
+      ttsStreamAbortRef.current?.abort();
+      ttsStreamAbortRef.current = null;
 
-      // ブラウザTTSはクラウドTTSが失敗した場合のみ使用
+      if (typeof window === 'undefined') return;
+
+      const requestId = ++ttsRequestIdRef.current;
+      const abort = new AbortController();
+      ttsStreamAbortRef.current = abort;
+
+      // ブラウザTTSフォールバック
       const playBrowserTts = () => {
-        // クラウドTTSが再生中なら何もしない（競合防止）
-        const currentAudio = ttsAudioRef.current;
-        if (currentAudio && !currentAudio.paused && currentAudio.src) {
-          return;
-        }
         if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
         try {
           const synth = window.speechSynthesis;
-          // 念のため再度キャンセル
           synth.cancel();
           const utter = new SpeechSynthesisUtterance(text);
           utter.lang = 'ja-JP';
           utter.rate = 1.1;
-          utter.onstart = () => {
-            ttsSpeakingRef.current = true;
-            setTtsSpeaking(true);
-          };
-          utter.onend = () => {
-            ttsSpeakingRef.current = false;
-            setTtsSpeaking(false);
-          };
-          utter.onerror = () => {
-            ttsSpeakingRef.current = false;
-            setTtsSpeaking(false);
-          };
+          utter.onstart = () => { ttsSpeakingRef.current = true; setTtsSpeaking(true); };
+          utter.onend = () => { ttsSpeakingRef.current = false; setTtsSpeaking(false); };
+          utter.onerror = () => { ttsSpeakingRef.current = false; setTtsSpeaking(false); };
           const voices = synth.getVoices();
-          const jaVoice = voices.find((voice) => voice.lang?.toLowerCase().startsWith('ja'));
-          if (jaVoice) {
-            utter.voice = jaVoice;
-          }
+          const jaVoice = voices.find((v) => v.lang?.toLowerCase().startsWith('ja'));
+          if (jaVoice) utter.voice = jaVoice;
           synth.speak(utter);
-        } catch {
-          // ignore speech errors
+        } catch { /* ignore */ }
+      };
+
+      // キュー内の次のテキストを再生
+      const processQueue = () => {
+        const next = ttsQueueRef.current.shift();
+        if (next) {
+          console.log(`[tts:queue] playing next (${next.length} chars), remaining: ${ttsQueueRef.current.length}`);
+          speakReply(next);
         }
       };
 
-      if (typeof window === 'undefined') return;
+      // ストリーミング再生: SSE で PCM チャンクを受け取り、AudioContext で即再生
+      const playStreaming = async () => {
+        // AudioContext をソースと同じ 24000Hz で作成（リサンプルによるノイズ回避）
+        let audioCtx = ttsAudioCtxRef.current;
+        if (!audioCtx || audioCtx.state === 'closed') {
+          audioCtx = new AudioContext({ sampleRate: 24000 });
+          ttsAudioCtxRef.current = audioCtx;
+        }
+        if (audioCtx.state === 'suspended') {
+          await audioCtx.resume();
+        }
 
-      // 新しいAudio要素を作成（既存のものを再利用すると競合する可能性）
-      const audio = new Audio();
-      ttsAudioRef.current = audio;
-
-      // このリクエストのIDを保存（競合検出用）
-      const requestId = Date.now();
-      (audio as any)._requestId = requestId;
-
-      try {
-        audio.onplay = () => {
-          // 古いリクエストの場合は無視
-          if ((ttsAudioRef.current as any)?._requestId !== requestId) return;
-          ttsSpeakingRef.current = true;
-          setTtsSpeaking(true);
-        };
-        audio.onended = () => {
-          if ((ttsAudioRef.current as any)?._requestId !== requestId) return;
-          ttsSpeakingRef.current = false;
-          setTtsSpeaking(false);
-          if (ttsAudioUrlRef.current) {
-            URL.revokeObjectURL(ttsAudioUrlRef.current);
-            ttsAudioUrlRef.current = null;
-          }
-        };
-        audio.onerror = () => {
-          if ((ttsAudioRef.current as any)?._requestId !== requestId) return;
-          ttsSpeakingRef.current = false;
-          setTtsSpeaking(false);
-          if (ttsAudioUrlRef.current) {
-            URL.revokeObjectURL(ttsAudioUrlRef.current);
-            ttsAudioUrlRef.current = null;
-          }
-          playBrowserTts();
-        };
-
-        fetch('/api/tts', {
+        const response = await fetch('/api/tts-stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text, speakingRate: ttsSpeedRef.current, voice: ttsVoiceRef.current }),
-        })
-          .then(async (response) => {
-            // 古いリクエストの場合は処理しない
-            if ((ttsAudioRef.current as any)?._requestId !== requestId) {
-              throw new Error('request_superseded');
-            }
-            if (!response.ok) {
-              const raw = await response.text().catch(() => '');
-              let detail = raw;
-              if (raw) {
-                try {
-                  const parsed = JSON.parse(raw);
-                  detail = parsed?.message || parsed?.error || raw;
-                } catch {
-                  // keep raw
-                }
-              }
-              const err = new Error(detail || `tts failed: ${response.status}`);
-              (err as any).status = response.status;
-              throw err;
-            }
-            return response.blob();
-          })
-          .then((blob) => {
-            if ((ttsAudioRef.current as any)?._requestId !== requestId) {
-              return;
-            }
-            const url = URL.createObjectURL(blob);
-            ttsAudioUrlRef.current = url;
-            audio.src = url;
-            return audio.play();
-          })
-          .catch((err) => {
-            // 古いリクエストがキャンセルされた場合は無視
-            if (err?.message === 'request_superseded') return;
-            if ((ttsAudioRef.current as any)?._requestId !== requestId) return;
+          signal: abort.signal,
+        });
 
-            ttsSpeakingRef.current = false;
-            const detail = err instanceof Error ? err.message : String(err || '');
-            const status = typeof (err as any)?.status === 'number' ? (err as any).status : 0;
-            const shouldReauth =
-              status === 401 || /invalid_grant|stale|missing_subject_token|expired/i.test(detail);
-            if (shouldReauth) {
-              onReauthRequired?.();
-            }
-            setTtsError(
-              detail
-                ? `クラウド読み上げに失敗しました: ${detail}`
-                : 'クラウド読み上げに失敗しました。ブラウザ読み上げに切替えます。',
-            );
-            playBrowserTts();
-          });
-      } catch (err) {
-        ttsSpeakingRef.current = false;
-        const detail = err instanceof Error ? err.message : String(err || '');
-        const status = typeof (err as any)?.status === 'number' ? (err as any).status : 0;
-        const shouldReauth =
-          status === 401 || /invalid_grant|stale|missing_subject_token|expired/i.test(detail);
-        if (shouldReauth) {
-          onReauthRequired?.();
+        if (!response.ok || !response.body) {
+          throw new Error(`tts-stream failed: ${response.status}`);
         }
-        setTtsError(
-          detail
-            ? `クラウド読み上げに失敗しました: ${detail}`
-            : 'クラウド読み上げに失敗しました。ブラウザ読み上げに切替えます。',
-        );
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let nextPlayTime = audioCtx.currentTime;
+        let started = false;
+        let sampleRate = 24000;
+        let sseBuffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (ttsRequestIdRef.current !== requestId) break;
+
+          sseBuffer += decoder.decode(value, { stream: true });
+          const lines = sseBuffer.split('\n');
+          sseBuffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            let evt: any;
+            try {
+              evt = JSON.parse(line.slice(6));
+            } catch {
+              continue; // JSON パースエラーはスキップ
+            }
+
+            if (evt.type === 'info' && evt.sampleRate) {
+              sampleRate = evt.sampleRate;
+            } else if (evt.type === 'audio' && evt.data) {
+              // base64 → Uint8Array → Int16 → Float32
+              const binaryStr = atob(evt.data);
+              const bytes = new Uint8Array(binaryStr.length);
+              for (let i = 0; i < binaryStr.length; i++) {
+                bytes[i] = binaryStr.charCodeAt(i);
+              }
+              const int16 = new Int16Array(bytes.buffer);
+              const float32 = new Float32Array(int16.length);
+              for (let i = 0; i < int16.length; i++) {
+                float32[i] = int16[i] / 32768;
+              }
+
+              const audioBuf = audioCtx.createBuffer(1, float32.length, sampleRate);
+              audioBuf.getChannelData(0).set(float32);
+
+              const source = audioCtx.createBufferSource();
+              source.buffer = audioBuf;
+              source.connect(audioCtx.destination);
+
+              const now = audioCtx.currentTime;
+              if (nextPlayTime < now) nextPlayTime = now;
+              source.start(nextPlayTime);
+              nextPlayTime += audioBuf.duration;
+
+              if (!started) {
+                started = true;
+                console.log('[tts:stream] first audio chunk playing');
+                ttsSpeakingRef.current = true;
+                setTtsSpeaking(true);
+                ttsAudioRef.current = new Audio();
+                (ttsAudioRef.current as any)._requestId = requestId;
+              }
+            } else if (evt.type === 'done') {
+              const remaining = Math.max(0, (nextPlayTime - audioCtx.currentTime) * 1000);
+              setTimeout(() => {
+                if (ttsRequestIdRef.current === requestId) {
+                  // キューに次のテキストがあれば再生、なければ停止
+                  if (ttsQueueRef.current.length > 0) {
+                    processQueue();
+                  } else {
+                    ttsSpeakingRef.current = false;
+                    setTtsSpeaking(false);
+                  }
+                }
+              }, remaining + 50);
+            } else if (evt.type === 'error') {
+              throw new Error(evt.message || 'tts_stream_error');
+            }
+          }
+        }
+      };
+
+      playStreaming().catch((err) => {
+        if (abort.signal.aborted) return;
+        if (ttsRequestIdRef.current !== requestId) return;
+        ttsSpeakingRef.current = false;
+        setTtsSpeaking(false);
+        const detail = err instanceof Error ? err.message : String(err || '');
+        console.warn('[tts:stream] failed, falling back to browser TTS:', detail);
+        setTtsError(detail ? `音声ストリーミングに失敗: ${detail}` : '');
         playBrowserTts();
-      }
+      });
     },
     [ttsEnabled, stopAllTts],
   );
@@ -1270,19 +1303,21 @@ function ChatPanel({
     // セッションID生成
     sessionIdRef.current = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     lastSavedMessageCountRef.current = 0;
-    setChatStarted(true);
 
     // 議題提案またはデフォルトメッセージを表示
     const messageText = initialMessage || 'はじめまして！今日からよろしくお願いします。もしよかったら、あなたのことを教えていただけますか？好きなことや趣味、どんなことに興味があるかなど、何でも大丈夫です！';
     const agendaMessage: ChatMessage = {
       id: createChatId(),
       role: 'assistant',
-      text: messageText,
+      text: stripFurigana(messageText), // UI表示用: 読み仮名除去
     };
     setMessages([agendaMessage]);
-    // AIメッセージを読み上げ
+
+    setChatStarted(true);
+
+    // AIメッセージを読み上げ（読み仮名付きのまま渡す）
     speakReply(messageText);
-  }, [initialMessage, speakReply]);
+  }, [initialMessage, speakReply, stripFurigana]);
 
   // 顔分析サマリーを受け取る
   const handleFaceAnalysisSummary = useCallback((summary: AnalysisSummary) => {
@@ -1638,6 +1673,7 @@ function ChatPanel({
               context,
               userInfo,
               faceAnalysis: faceAnalysisRealtime,
+              msAccountId,
             }),
           });
 
@@ -1657,13 +1693,21 @@ function ChatPanel({
           }
 
           const decoder = new TextDecoder();
-          let fullReply = '';
-          let displayReply = '';
+          let fullReply = '';        // 生テキスト（表情タグ除去後、読み仮名あり）
+          let rawTtsText = '';       // TTS用テキスト（読み仮名あり）
           let hasStartedTts = false;
-          let pendingTtsText = '';
+          let pendingTtsText = '';   // まだ TTS に送っていないテキスト
           let expressionParsed = false;
 
-          const isSentenceComplete = (txt: string) => /[。！？\n]$/.test(txt.trim());
+          // TTS を早く開始するため、句読点・文末・一定長で発話可能と判定
+          const isSpeakable = (txt: string) => {
+            const trimmed = txt.trim();
+            if (!trimmed) return false;
+            if (/[。！？\n]$/.test(trimmed)) return true;
+            if (/、$/.test(trimmed) && trimmed.length >= 15) return true;
+            if (trimmed.length >= 30) return true;
+            return false;
+          };
 
           setMessages((prev) => [...prev, { id: assistantMessageId, role: 'assistant', text: '' }]);
 
@@ -1685,21 +1729,23 @@ function ChatPanel({
                     if (!expressionParsed && fullReply.includes(']')) {
                       const { expression, cleanText } = parseExpression(fullReply);
                       setAvatarExpression(expression);
-                      displayReply = cleanText;
+                      rawTtsText = cleanText;
                       pendingTtsText = cleanText;
                       expressionParsed = true;
                     } else if (expressionParsed) {
-                      displayReply += data.text;
+                      rawTtsText += data.text;
                       pendingTtsText += data.text;
                     }
 
+                    // UI表示用: 読み仮名を除去
                     setMessages((prev) =>
                       prev.map((m) =>
-                        m.id === assistantMessageId ? { ...m, text: displayReply } : m
+                        m.id === assistantMessageId ? { ...m, text: stripFurigana(rawTtsText) } : m
                       )
                     );
 
-                    if (!hasStartedTts && isSentenceComplete(pendingTtsText)) {
+                    // TTS 早期トリガー（最初のチャンク）
+                    if (!hasStartedTts && isSpeakable(pendingTtsText)) {
                       hasStartedTts = true;
                       speakReply(pendingTtsText.trim());
                       pendingTtsText = '';
@@ -1709,15 +1755,20 @@ function ChatPanel({
                     if (!expressionParsed) {
                       const { expression, cleanText } = parseExpression(fullReply);
                       setAvatarExpression(expression);
-                      displayReply = cleanText;
+                      rawTtsText = cleanText;
+                      pendingTtsText = cleanText;
                       setMessages((prev) =>
                         prev.map((m) =>
-                          m.id === assistantMessageId ? { ...m, text: displayReply } : m
+                          m.id === assistantMessageId ? { ...m, text: stripFurigana(rawTtsText) } : m
                         )
                       );
                     }
-                    if (!hasStartedTts && displayReply.trim()) {
-                      speakReply(displayReply.trim());
+                    if (!hasStartedTts && rawTtsText.trim()) {
+                      // TTS がまだ始まっていない → 全文を再生
+                      speakReply(rawTtsText.trim());
+                    } else if (hasStartedTts && pendingTtsText.trim()) {
+                      // 最初のチャンクは再生中 → 残りをキューに追加
+                      speakReply(pendingTtsText.trim(), { append: true });
                     }
                   } else if (data.type === 'error') {
                     throw new Error(data.error || 'stream_error');
@@ -1748,7 +1799,7 @@ function ChatPanel({
         const response = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text, history, context, userInfo }),
+          body: JSON.stringify({ message: text, history, context, userInfo, faceAnalysis: faceAnalysisRealtime, msAccountId }),
         });
         if (!response.ok) {
           const message = await readChatError(response);
@@ -1769,9 +1820,9 @@ function ChatPanel({
           setAvatarExpression(expression);
           reply = cleanText;
         }
-        const assistantMessage: ChatMessage = { id: assistantMessageId, role: 'assistant', text: reply };
+        const assistantMessage: ChatMessage = { id: assistantMessageId, role: 'assistant', text: stripFurigana(reply) };
         setMessages((prev) => [...prev, assistantMessage]);
-        speakReply(reply);
+        speakReply(reply); // TTSには読み仮名付きで渡す
       };
 
       try {
@@ -1786,7 +1837,7 @@ function ChatPanel({
         setError(err instanceof Error ? err.message : String(err));
       }
     },
-    [messages, speakReply, status, context, userInfo],
+    [messages, speakReply, status, context, userInfo, faceAnalysisRealtime, msAccountId],
   );
 
   useEffect(() => {
@@ -2134,15 +2185,12 @@ function ChatPanel({
     }
   }, [completeVoiceTranscript, disableVoice, finalizeVoiceCapture, status, voiceStatus, voiceSupported]);
 
-  // チャット開始時に音声入力を自動開始
+  // 事前準備フラグがtrueになったら音声キャプチャを開始（最初のスタートボタン押下時）
   useEffect(() => {
-    if (chatStarted && voiceSupported && !disableVoice && voiceStatus === 'idle') {
-      const timer = setTimeout(() => {
-        startVoiceCapture();
-      }, 1000); // AIの読み上げが始まってから少し待つ
-      return () => clearTimeout(timer);
+    if (prepareVoice && voiceSupported && !disableVoice && voiceStatus === 'idle') {
+      startVoiceCapture();
     }
-  }, [chatStarted, voiceSupported, disableVoice, voiceStatus, startVoiceCapture]);
+  }, [prepareVoice, voiceSupported, disableVoice, voiceStatus, startVoiceCapture]);
 
   const canSend = chatStarted && status !== 'running' && input.trim().length > 0;
   const voiceButtonLabel =
@@ -2190,9 +2238,25 @@ function ChatPanel({
 
       {/* メインコンテンツエリア */}
       {!chatStarted ? (
-        <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6">
-          <p className="text-sm text-slate-600">会話を始める準備ができたら、スタートボタンを押してください。</p>
-          <Button onClick={handleChatStart} className="px-8 py-3 text-base">
+        <div className="flex-1 flex flex-col items-center justify-center gap-6 px-6">
+          <div className="w-48 h-48 rounded-full bg-gradient-to-b from-sky-50 to-indigo-50 border border-slate-200 overflow-hidden">
+            <Live2DAvatar
+              modelPath="/live2d/ran.model3.json"
+              autoSize
+              isSpeaking={false}
+              audioElement={null}
+              zoom={avatarZoom}
+              offsetY={avatarOffsetY}
+              expression="smile"
+            />
+          </div>
+          <div className="text-center space-y-2">
+            <h3 className="text-lg font-semibold text-slate-800">おはようございます！</h3>
+            <p className="text-sm text-slate-500">
+              {userInfo?.name ? `${userInfo.name}さん、` : ''}今日もよろしくお願いします
+            </p>
+          </div>
+          <Button onClick={handleChatStart} className="px-8 py-3 text-base rounded-full shadow-sm">
             会話をスタート
           </Button>
         </div>
@@ -2354,13 +2418,13 @@ function ChatPanel({
                 <button
                   onClick={() => setShowAvatarSettings(true)}
                   className={cn(
-                    "absolute w-7 h-7 bg-white/80 hover:bg-white rounded-full flex items-center justify-center text-slate-500 hover:text-slate-700 shadow-sm z-10",
+                    "absolute w-8 h-8 bg-white/90 hover:bg-white rounded-full flex items-center justify-center text-slate-400 hover:text-slate-700 shadow-sm z-10 transition-colors",
                     earOnlyMode ? "top-2 left-2" : "bottom-2 left-2"
                   )}
                   style={{ pointerEvents: 'auto' }}
-                  title="設定"
+                  title="アバター・音声の設定"
                 >
-                  +
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                 </button>
               )}
             </div>
@@ -2460,8 +2524,16 @@ function ChatPanel({
               <span className="text-slate-400">聞き取り中…</span>
             )}
           </div>
-          {voiceError && <div className="flex-shrink-0 text-[10px] text-red-600">{voiceError}</div>}
-          {ttsError && <div className="flex-shrink-0 text-[10px] text-amber-600">{ttsError}</div>}
+          {voiceError && (
+            <div className="flex-shrink-0 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-700">
+              {voiceError}
+            </div>
+          )}
+          {ttsError && (
+            <div className="flex-shrink-0 rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-700">
+              {ttsError}
+            </div>
+          )}
 
           <ScrollArea className={cn(
             "flex-1 min-h-0 rounded-2xl border border-slate-200 bg-white px-4 py-4",
@@ -2491,7 +2563,13 @@ function ChatPanel({
               </div>
             ))}
             {status === 'running' && (
-              <div className="text-xs text-slate-400">返信中…</div>
+              <div className="flex justify-start">
+                <div className="flex items-center gap-1.5 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-slate-400">
+                  <span className="typing-dot" />
+                  <span className="typing-dot" />
+                  <span className="typing-dot" />
+                </div>
+              </div>
             )}
             <div ref={endRef} />
           </div>
@@ -2866,6 +2944,8 @@ export default function App() {
   const [facilitatorId, setFacilitatorId] = useState('');
   const [talentId, setTalentId] = useState('');
   const [isInitialSetupOpen, setIsInitialSetupOpen] = useState(false);
+  const [isWelcomeLoading, setIsWelcomeLoading] = useState(false);
+  const [voicePrepared, setVoicePrepared] = useState(false);
   const [initialSetupDraft, setInitialSetupDraft] = useState({
     mode: 'online' as 'online' | 'offline',
     meetingTypeId: meetingTypeId ?? '',
@@ -6385,6 +6465,7 @@ useEffect(() => {
 
   const navItems: Array<{ id: NavTarget; label: string; view?: ActiveView }> = [
     { id: 'chat', label: '会話', view: 'chat' },
+    { id: 'record', label: '支援記録', view: 'record' },
     { id: 'interview', label: '面接練習', view: 'interview' },
   ];
 
@@ -6753,6 +6834,7 @@ useEffect(() => {
                   initialMessage={agendaSuggestion}
                   userInfo={{ name: msAccount?.name || msAccount?.username || '' }}
                   msAccountId={msAccount?.homeAccountId || msAccount?.localAccountId || ''}
+                  prepareVoice={voicePrepared}
                 />
               </section>
             )}
@@ -6783,7 +6865,10 @@ useEffect(() => {
 
             <Button
               onClick={async () => {
+                setIsWelcomeLoading(true);
                 setAudioSource('mic');
+                // 音声準備を開始（Deepgram接続）
+                setVoicePrepared(true);
                 // 議題提案を取得（待ってから画面を開く）
                 const msAccountId = msAccount?.homeAccountId || msAccount?.localAccountId || '';
                 if (msAccountId) {
@@ -6809,11 +6894,20 @@ useEffect(() => {
                   }
                 }
                 // 議題提案取得後に画面を開く
+                setIsWelcomeLoading(false);
                 setIsInitialSetupOpen(false);
               }}
               className="px-12 py-4 text-lg"
+              disabled={isWelcomeLoading}
             >
-              スタート
+              {isWelcomeLoading ? (
+                <span className="flex items-center gap-2">
+                  <span className="animate-spin rounded-full h-5 w-5 border-b-2 border-white" />
+                  準備中...
+                </span>
+              ) : (
+                'スタート'
+              )}
             </Button>
           </div>
         </div>

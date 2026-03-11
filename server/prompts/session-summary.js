@@ -132,6 +132,14 @@ const formatUserProfile = (userProfile) => {
   return parts.join('\n');
 };
 
+// 共通の読み仮名指示（agenda / chat 共通）
+const FURIGANA_INSTRUCTION = [
+  '## 読み仮名（重要）',
+  '人名・地名・難読語・複数読みがある語に読み仮名を付けてください。形式: 漢字《よみがな》',
+  '例: 山田《やまだ》さん、今日《きょう》はどうですか？',
+  '※ 一般的な漢字（天気、仕事、楽しいなど）には不要。迷ったら付ける。',
+].join('\n');
+
 export const getAgendaSuggestionPrompt = ({
   summaries,
   userName,
@@ -170,6 +178,9 @@ export const getAgendaSuggestionPrompt = ({
       '## 出力例',
       `「${userName || ''}さん！おはようございます！今日は「${suggestedTopics[0] || ''}」についてお話ししようと思ってるんですが、いかがですか？もちろん、他に話したいことがあればそちらでも大丈夫です！」`,
       '',
+      '',
+      FURIGANA_INSTRUCTION,
+      '',
       '## 出力',
       '挨拶と議題提案メッセージのみを出力してください。',
     ];
@@ -197,6 +208,9 @@ export const getAgendaSuggestionPrompt = ({
       userName
         ? `「${userName}さん！はじめまして！今日からよろしくお願いします。もしよかったら、あなたのことを教えていただけますか？好きなことや趣味、どんなことに興味があるかなど、何でも大丈夫です！」`
         : '「はじめまして！今日からよろしくお願いします。もしよかったら、あなたのことを教えていただけますか？好きなことや趣味、どんなことに興味があるかなど、何でも大丈夫です！」',
+      '',
+      '',
+      FURIGANA_INSTRUCTION,
       '',
       '## 出力',
       '挨拶と自己紹介のお願いメッセージのみを出力してください。',
@@ -228,6 +242,9 @@ export const getAgendaSuggestionPrompt = ({
       '',
       '## 出力例',
       `「${userName || ''}さん！こんにちは！前回のお話で気になっていた「${nextSuggestions[0] || ''}」について、今日確認しようと思っていましたが、何か他に話したいことがあれば、そちらでも大丈夫です！どうしましょう？」`,
+      '',
+      '',
+      FURIGANA_INSTRUCTION,
       '',
       '## 出力',
       '挨拶と議題提案メッセージのみを出力してください。',
@@ -271,7 +288,7 @@ export const getAgendaSuggestionPrompt = ({
     }
   });
 
-  lines.push('', '## 出力', '議題提案のメッセージのみを出力してください。');
+  lines.push('', FURIGANA_INSTRUCTION, '', '## 出力', '議題提案のメッセージのみを出力してください。');
 
   return lines.join('\n');
 };

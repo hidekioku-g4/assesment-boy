@@ -374,50 +374,63 @@ const createWindow = async (startTarget) => {
   mainWindow = win;
 };
 
-app.whenReady().then(async () => {
-  if (requireDesktopLocation()) return;
-
-  setupFileLogging();
-  ensureUserDataFiles();
-  const startTarget = resolveStartTarget();
-
-  // 常にサーバーを起動（ELECTRON_START_URLが指定されている場合は外部サーバーを使用）
-  if (startTarget.type === 'url' && !process.env.ELECTRON_START_URL) {
-    try {
-      await startServer(startTarget.target);
-    } catch (error) {
-      console.error('[server] startup failed', error);
-      dialog.showMessageBoxSync({
-        type: 'error',
-        buttons: ['終了'],
-        defaultId: 0,
-        message: '起動に失敗しました。',
-        detail: 'ローカルサーバの起動に失敗しました。もう一度起動してください。',
-      });
-      app.quit();
-      return;
-    }
-  }
-
-  await createWindow(startTarget);
-
-  app.on('activate', async () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      await createWindow(startTarget);
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
     }
   });
-});
 
-app.on('before-quit', () => {
-  stopServer();
-});
+  app.whenReady().then(async () => {
+    if (requireDesktopLocation()) return;
 
-app.on('window-all-closed', () => {
-  stopServer();
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
+    setupFileLogging();
+    ensureUserDataFiles();
+    const startTarget = resolveStartTarget();
+
+    // 常にサーバーを起動（ELECTRON_START_URLが指定されている場合は外部サーバーを使用）
+    if (startTarget.type === 'url' && !process.env.ELECTRON_START_URL) {
+      try {
+        await startServer(startTarget.target);
+      } catch (error) {
+        console.error('[server] startup failed', error);
+        dialog.showMessageBoxSync({
+          type: 'error',
+          buttons: ['終了'],
+          defaultId: 0,
+          message: '起動に失敗しました。',
+          detail: 'ローカルサーバの起動に失敗しました。もう一度起動してください。',
+        });
+        app.quit();
+        return;
+      }
+    }
+
+    await createWindow(startTarget);
+
+    app.on('activate', async () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        await createWindow(startTarget);
+      }
+    });
+  });
+
+  app.on('before-quit', () => {
+    stopServer();
+  });
+
+  app.on('window-all-closed', () => {
+    stopServer();
+    if (process.platform !== 'darwin') {
+      app.quit();
+    }
+  });
+}
 
 ipcMain.handle('auth:login', async () => {
   const scopes = ['openid', 'profile', 'email'];
