@@ -1008,6 +1008,11 @@ app.post('/api/chat', async (req, res) => {
   const userInfo = typeof req.body?.userInfo === 'object' && req.body.userInfo ? req.body.userInfo : {};
   const faceAnalysis = typeof req.body?.faceAnalysis === 'object' && req.body.faceAnalysis ? req.body.faceAnalysis : null;
   const msAccountId = typeof req.body?.msAccountId === 'string' ? req.body.msAccountId : '';
+  const ALLOWED_CHAT_MODELS = new Set([
+    'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-2.5-flash-preview-05-20',
+  ]);
+  const reqModel = typeof req.body?.geminiModel === 'string' ? req.body.geminiModel.trim() : '';
+  const chatModel = (reqModel && ALLOWED_CHAT_MODELS.has(reqModel)) ? reqModel : DEFAULT_GEMINI_MODEL;
   const maxMessages = Number(process.env.CHAT_HISTORY_MAX_MESSAGES ?? 9999);
   const maxChars = Number(process.env.CHAT_HISTORY_MESSAGE_CHARS ?? 800);
   const maxContextChars = Number(process.env.CHAT_CONTEXT_MAX_CHARS ?? 4000);
@@ -1023,7 +1028,7 @@ app.post('/api/chat', async (req, res) => {
 
   const trimmedContext = context.slice(0, maxContextChars);
   const startTime = Date.now();
-  console.log(`[chat] start (len:${message.length}, history:${history.length}, context:${trimmedContext.length}, user:${userInfo.name || 'unknown'})`);
+  console.log(`[chat] start (len:${message.length}, history:${history.length}, context:${trimmedContext.length}, user:${userInfo.name || 'unknown'}, model:${chatModel})`);
 
   try {
     const userProfile = await getCachedProfile(msAccountId);
@@ -1035,7 +1040,7 @@ app.post('/api/chat', async (req, res) => {
 
     const geminiStart = Date.now();
     const result = await generateGeminiContent({
-      model: DEFAULT_GEMINI_MODEL,
+      model: chatModel,
       config: { systemInstruction },
       contents,
     }, 'chat');
@@ -1074,6 +1079,11 @@ app.post('/api/chat-stream', async (req, res) => {
   const userInfo = typeof req.body?.userInfo === 'object' && req.body.userInfo ? req.body.userInfo : {};
   const faceAnalysis = typeof req.body?.faceAnalysis === 'object' && req.body.faceAnalysis ? req.body.faceAnalysis : null;
   const msAccountId = typeof req.body?.msAccountId === 'string' ? req.body.msAccountId : '';
+  const ALLOWED_STREAM_MODELS = new Set([
+    'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-2.5-flash-preview-05-20',
+  ]);
+  const reqStreamModel = typeof req.body?.geminiModel === 'string' ? req.body.geminiModel.trim() : '';
+  const chatModel = (reqStreamModel && ALLOWED_STREAM_MODELS.has(reqStreamModel)) ? reqStreamModel : DEFAULT_GEMINI_MODEL;
   const maxMessages = Number(process.env.CHAT_HISTORY_MAX_MESSAGES ?? 9999);
   const maxChars = Number(process.env.CHAT_HISTORY_MESSAGE_CHARS ?? 800);
   const maxContextChars = Number(process.env.CHAT_CONTEXT_MAX_CHARS ?? 4000);
@@ -1089,7 +1099,7 @@ app.post('/api/chat-stream', async (req, res) => {
 
   const trimmedContext = context.slice(0, maxContextChars);
   const startTime = Date.now();
-  console.log(`[chat-stream] start (len:${message.length}, history:${history.length}, context:${trimmedContext.length})`);
+  console.log(`[chat-stream] start (len:${message.length}, history:${history.length}, context:${trimmedContext.length}, model:${chatModel})`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -1106,7 +1116,7 @@ app.post('/api/chat-stream', async (req, res) => {
     const geminiStart = Date.now();
 
     const stream = await genAI.models.generateContentStream({
-      model: DEFAULT_GEMINI_MODEL,
+      model: chatModel,
       config: { systemInstruction },
       contents,
     });

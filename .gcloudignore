@@ -1,0 +1,14 @@
+# gcloud deploy: 全体を無視して必要なものだけ許可
+*
+
+# 必要なファイル
+!Dockerfile
+!.dockerignore
+!package.json
+!package-lock.json
+!server/
+!server/**
+!public/
+!public/**
+!config/
+!config/support-record.json

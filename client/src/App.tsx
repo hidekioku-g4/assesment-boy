@@ -970,6 +970,8 @@ function ChatPanel({
   const [ttsVoiceOptions, setTtsVoiceOptions] = useState<{ id: string; name: string }[]>([]);
   const [ttsSpeaking, setTtsSpeaking] = useState(false);
   const [ttsError, setTtsError] = useState<string | null>(null);
+  // AIモデル切替（ABテスト用）
+  const [geminiModel, setGeminiModel] = useState('gemini-2.0-flash');
   // 顔分析関連（デフォルトON）
   const [faceAnalysisEnabled, setFaceAnalysisEnabled] = useState(true);
   const [faceAnalysisSummary, setFaceAnalysisSummary] = useState<AnalysisSummary | null>(null);
@@ -1675,6 +1677,7 @@ function ChatPanel({
               userInfo,
               faceAnalysis: faceAnalysisRealtime,
               msAccountId,
+              geminiModel,
             }),
           });
 
@@ -2377,6 +2380,19 @@ function ChatPanel({
                       className="flex-1 cursor-pointer"
                     />
                     <span className="w-10 text-right">{ttsSpeed.toFixed(2)}</span>
+                  </div>
+                  {/* AIモデル切替 */}
+                  <div className="flex items-center gap-2">
+                    <span className="w-16">AI:</span>
+                    <select
+                      value={geminiModel}
+                      onChange={(e) => setGeminiModel(e.target.value)}
+                      className="flex-1 text-xs border border-slate-200 rounded px-1 py-0.5 bg-white"
+                    >
+                      <option value="gemini-2.0-flash">2.0 Flash（現在）</option>
+                      <option value="gemini-2.5-flash">2.5 Flash</option>
+                      <option value="gemini-3-flash-preview">3 Flash（最新）</option>
+                    </select>
                   </div>
                   {/* 顔分析リアルタイム結果 */}
                   {faceAnalysisEnabled && (
