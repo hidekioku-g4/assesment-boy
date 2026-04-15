@@ -15,6 +15,7 @@ import {
   getMsalAccount,
   msalInstance,
 } from '@/lib/msal';
+import { fetchWithAuth, getWsTokenParam } from '@/lib/fetchWithAuth';
 import { SupportRecordPanel, type SupportRecordSection } from '@/features/support-record/support-record-panel';
 import { InterviewPracticePanel } from '@/features/interview-practice/interview-practice-panel';
 import {
@@ -1181,7 +1182,7 @@ function ChatPanel({
           await audioCtx.resume();
         }
 
-        const response = await fetch('/api/tts-stream', {
+        const response = await fetchWithAuth('/api/tts-stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text, speakingRate: ttsSpeedRef.current, voice: ttsVoiceRef.current }),
@@ -1371,7 +1372,7 @@ function ChatPanel({
   // 顔分析AIフィードバックを取得
   const requestFaceAIFeedback = useCallback(async (summary: AnalysisSummary): Promise<string> => {
     try {
-      const response = await fetch('/api/face-analysis-feedback', {
+      const response = await fetchWithAuth('/api/face-analysis-feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1417,7 +1418,7 @@ function ChatPanel({
 
     try {
       // セッション要約を生成・保存
-      await fetch('/api/session-summary', {
+      await fetchWithAuth('/api/session-summary', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1478,7 +1479,7 @@ function ChatPanel({
       console.log(`[chat] heartbeat sent via beacon (messages:${messages.length}, final:${isFinal})`);
     } else {
       // フォールバック
-      fetch('/api/session-heartbeat', {
+      fetchWithAuth('/api/session-heartbeat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -1563,7 +1564,7 @@ function ChatPanel({
 
   // TTS音声リストを取得
   useEffect(() => {
-    fetch('/api/tts/voices')
+    fetchWithAuth('/api/tts/voices')
       .then((res) => res.json())
       .then((data) => {
         if (Array.isArray(data?.voices)) {
@@ -1664,7 +1665,7 @@ function ChatPanel({
       // ストリーミングAPIを試行し、失敗したら通常APIにフォールバック
       const tryStreaming = async (): Promise<boolean> => {
         try {
-          const response = await fetch('/api/chat-stream', {
+          const response = await fetchWithAuth('/api/chat-stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1796,7 +1797,7 @@ function ChatPanel({
 
       // 通常のAPI（フォールバック）
       const useFallback = async () => {
-        const response = await fetch('/api/chat', {
+        const response = await fetchWithAuth('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: text, history, context, userInfo, faceAnalysis: faceAnalysisRealtime, msAccountId }),
@@ -2054,7 +2055,8 @@ function ChatPanel({
       });
       audioCtxRef.current = ctx;
 
-      const wsUrl = `${window.location.origin.replace('http', 'ws')}/ws?lang=ja&model=nova-3&codec=linear16&rate=${rate}`;
+      const wsTokenParam = await getWsTokenParam();
+      const wsUrl = `${window.location.origin.replace('http', 'ws')}/ws?lang=ja&model=nova-3&codec=linear16&rate=${rate}${wsTokenParam}`;
       console.log('[voice-ws] connecting to:', wsUrl);
       const ws = new WebSocket(wsUrl);
       ws.binaryType = 'arraybuffer';
@@ -3249,7 +3251,7 @@ ${currentContext || '（ドラフトがありません）'}
   const fetchSupportRecordConfig = useCallback(
     async (signal?: AbortSignal) => {
       try {
-        const response = await fetch('/api/support-record-config', { signal });
+        const response = await fetchWithAuth('/api/support-record-config', { signal });
         if (!response.ok) {
           throw new Error(`config load failed: ${response.status}`);
         }
@@ -3926,7 +3928,7 @@ useEffect(() => {
 
       try {
 
-        const response = await fetch(`/api/support-record/${encodeURIComponent(recordId)}`, {
+        const response = await fetchWithAuth(`/api/support-record/${encodeURIComponent(recordId)}`, {
 
           signal: controller.signal,
 
@@ -4202,7 +4204,7 @@ useEffect(() => {
       try {
         // BigQuery操作の前にトークンをリフレッシュ
         await refreshSubjectToken();
-        const response = await fetch(`/api/participants?role=${role}`);
+        const response = await fetchWithAuth(`/api/participants?role=${role}`);
         if (!response.ok) {
           try {
             const errorJson = await response.json();
@@ -4736,7 +4738,7 @@ useEffect(() => {
     setConfigSaveStatus('running');
     setConfigError(null);
     try {
-      const response = await fetch('/api/support-record-config', {
+      const response = await fetchWithAuth('/api/support-record-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin: adminPin.trim(), config: normalized }),
@@ -4794,7 +4796,7 @@ useEffect(() => {
     // 議題提案を取得（MSアカウントがある場合のみ）
     const msAccountId = msAccount?.homeAccountId || msAccount?.localAccountId || '';
     if (msAccountId) {
-      fetch('/api/agenda-suggestion', {
+      fetchWithAuth('/api/agenda-suggestion', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -4922,7 +4924,7 @@ useEffect(() => {
       }));
 
 
-      const response = await fetch('/api/support-record', {
+      const response = await fetchWithAuth('/api/support-record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -5042,7 +5044,7 @@ useEffect(() => {
       while (true) {
         let retryable = true;
         try {
-          const response = await fetch('/api/support-record-complete', {
+          const response = await fetchWithAuth('/api/support-record-complete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -5099,7 +5101,7 @@ useEffect(() => {
       // セッション要約を非同期で生成・保存（エラーは無視）
       const msAccountIdForSummary = msAccount?.homeAccountId || msAccount?.localAccountId || '';
       if (msAccountIdForSummary) {
-        fetch('/api/session-summary', {
+        fetchWithAuth('/api/session-summary', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -5164,7 +5166,7 @@ useEffect(() => {
     setErrorMessage(null);
 
     try {
-      const cleanResponse = await fetch('/api/clean-two-stage', {
+      const cleanResponse = await fetchWithAuth('/api/clean-two-stage', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -5198,7 +5200,7 @@ useEffect(() => {
         value: mergeSupportRecordText(section.value ?? '', section.aiAppend ?? section.suggestion ?? null),
       }));
 
-      const refineResponse = await fetch('/api/support-record-refine', {
+      const refineResponse = await fetchWithAuth('/api/support-record-refine', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -5278,7 +5280,7 @@ useEffect(() => {
         title: section.title,
         value: mergeSupportRecordText(section.value ?? '', section.aiAppend ?? section.suggestion ?? null),
       }));
-      const response = await fetch('/api/agenda-proposals', {
+      const response = await fetchWithAuth('/api/agenda-proposals', {
 
         method: 'POST',
 
@@ -5429,7 +5431,7 @@ useEffect(() => {
           value: mergeSupportRecordText(section.value ?? '', section.aiAppend ?? section.suggestion ?? null),
         }));
 
-        const response = await fetch('/api/support-record-draft', {
+        const response = await fetchWithAuth('/api/support-record-draft', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -6021,6 +6023,8 @@ useEffect(() => {
 
       keywordList.length > 0 ? `&keywords=${encodeURIComponent(keywordList.join(','))}` : '';
 
+    const wsTokenParam = await getWsTokenParam();
+
     const wsUrl = `${window.location.origin.replace('http', 'ws')}/ws?lang=${encodeURIComponent(
 
       lang,
@@ -6029,7 +6033,7 @@ useEffect(() => {
 
       rate,
 
-    )}${keywordsParam}`;
+    )}${keywordsParam}${wsTokenParam}`;
 
 
 
@@ -6325,7 +6329,7 @@ useEffect(() => {
 
     try {
 
-      const response = await fetch('/api/clean', {
+      const response = await fetchWithAuth('/api/clean', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -6873,7 +6877,7 @@ useEffect(() => {
                 const msAccountId = msAccount?.homeAccountId || msAccount?.localAccountId || '';
                 if (msAccountId) {
                   try {
-                    const res = await fetch('/api/agenda-suggestion', {
+                    const res = await fetchWithAuth('/api/agenda-suggestion', {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({

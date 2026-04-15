@@ -1,0 +1,13 @@
+node_modules
+dist
+.env
+client/.env
+.claude
+.git
+electron
+data
+docs
+assets
+_backup*
+*.exe
+*.md

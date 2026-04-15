@@ -22,6 +22,7 @@ import { fetchParticipants, insertSupportRecord, insertSessionSummary, fetchSess
 import { synthesize as ttsSynthesize, getVoices as ttsGetVoices } from './tts/index.js';
 import { preprocessTtsText, warmupTokenizer } from './tts/preprocess.js';
 import { synthesizeStream as ttsStream, warmup as ttsWarmup, STREAM_SAMPLE_RATE } from './tts/cartesia-stream.js';
+import { requireAuth, verifyWsToken } from './auth-middleware.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1167,6 +1168,9 @@ app.post('/api/ms-subject-token', async (req, res) => {
   }
 });
 
+// ── 認証ミドルウェア: これ以降の /api/* ルートは Azure AD トークン検証必須 ──
+app.use('/api', requireAuth);
+
 app.get('/api/tts/voices', (req, res) => {
   res.json(ttsGetVoices());
 });
@@ -2058,13 +2062,22 @@ wss.on('error', (error) => {
   console.error('[wss] error', error);
 });
 
-wss.on('connection', (clientWs, req) => {
+wss.on('connection', async (clientWs, req) => {
   const url = new URL(req.url || '', `http://${req.headers.host}`);
+
+  // WebSocket 認証: クエリパラメータ token で Azure AD idToken を検証
+  const wsToken = url.searchParams.get('token') || '';
+  const wsUser = await verifyWsToken(wsToken);
+  if (wsUser === null) {
+    clientWs.close(4401, 'Unauthorized');
+    return;
+  }
+
   const lang = url.searchParams.get('lang') || 'ja';
   const requestedModel = url.searchParams.get('model') || undefined;
   const codec = (url.searchParams.get('codec') || 'linear16').toLowerCase();
   const rate = String(url.searchParams.get('rate') || '48000');
-  
+
   const keywordsParam = url.searchParams.get('keywords') || '';
   const userKeywords = keywordsParam ? keywordsParam.split(',').map(k => k.trim()).filter(Boolean) : [];
   const keywords = mergeKeywords(DEFAULT_KEYWORDS, userKeywords);
