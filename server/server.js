@@ -1049,6 +1049,13 @@ app.post('/api/chat', async (req, res) => {
     if (!reply) {
       throw new Error('chat_empty');
     }
+    // モードタグを解析: [mode:aizuchi|respond|silent] が先頭に来る
+    let mode = 'respond';
+    const modeMatch = reply.match(/^\[mode:(aizuchi|respond|silent)\]\s*/);
+    if (modeMatch) {
+      mode = modeMatch[1];
+      reply = reply.slice(modeMatch[0].length).trim();
+    }
     // 表情タグを解析: [表情:smile] テキスト → { expression: 'smile', text: 'テキスト' }
     let expression = 'neutral';
     const expressionMatch = reply.match(/^\[表情:(\w+)\]\s*/);
@@ -1056,8 +1063,8 @@ app.post('/api/chat', async (req, res) => {
       expression = expressionMatch[1];
       reply = reply.slice(expressionMatch[0].length).trim();
     }
-    console.log(`[chat] done - Gemini: ${geminiEnd - geminiStart}ms, Total: ${Date.now() - startTime}ms, reply: ${reply.length}chars, expression: ${expression}`);
-    res.json({ reply, expression, usage: toUsageSummary(result) });
+    console.log(`[chat] done - Gemini: ${geminiEnd - geminiStart}ms, Total: ${Date.now() - startTime}ms, mode: ${mode}, reply: ${reply.length}chars, expression: ${expression}`);
+    res.json({ reply, mode, expression, usage: toUsageSummary(result) });
   } catch (error) {
     respondGeminiError(res, error, 'chat');
   }

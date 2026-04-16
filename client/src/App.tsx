@@ -992,6 +992,18 @@ function ChatPanel({
   const [avatarExpression, setAvatarExpression] = useState<ExpressionType>('neutral');
   const [earOnlyMode, setEarOnlyMode] = useState(false); // 耳だけモード（文字非表示、キャラ中央）
 
+  // テキストから返答モードタグを解析して除去（[mode:aizuchi|respond|silent]）
+  const parseMode = useCallback((text: string): { mode: 'aizuchi' | 'respond' | 'silent'; cleanText: string } => {
+    const match = text.match(/^\[mode:(aizuchi|respond|silent)\]\s*/);
+    if (match) {
+      return {
+        mode: match[1] as 'aizuchi' | 'respond' | 'silent',
+        cleanText: text.slice(match[0].length).trim(),
+      };
+    }
+    return { mode: 'respond', cleanText: text };
+  }, []);
+
   // テキストから表情タグを解析して除去
   const parseExpression = useCallback((text: string): { expression: ExpressionType; cleanText: string } => {
     const match = text.match(/^\[表情:(\w+)\]\s*/);
@@ -1047,6 +1059,10 @@ function ChatPanel({
     return 99999999; // manual/typing: 自動送信しない
   };
   const AUTO_SEND_RMS_THRESHOLD = 0.015;
+  // バージイン用の閾値は自動送信より高め（TTS残響を誤検知しないため）
+  const BARGE_IN_RMS_THRESHOLD = 0.025;
+  // 連続何フレームで「本物のユーザー発話」と判定するか (2048samples/48kHz≒43ms × 4 ≈ 170ms)
+  const BARGE_IN_CONSECUTIVE_FRAMES = 4;
   const PREBUFFER_MS = 2000;
 
   const voiceSupported =
@@ -1059,6 +1075,20 @@ function ChatPanel({
   useEffect(() => {
     voiceStatusRef.current = voiceStatus;
   }, [voiceStatus]);
+
+  // バージイン判定用: chat 状態を ref 経由で audioprocess コールバックから参照する
+  const statusRef = useRef<ChatStatus>('idle');
+  const bargeInFrameCountRef = useRef(0);
+  // バージイン検出中に保留した音声フレーム。割り込み確定時に Deepgram へ flush する（頭切れ防止）
+  const bargeInPendingFramesRef = useRef<ArrayBuffer[]>([]);
+  // chat-stream の進行中リクエストを中断するためのコントローラ
+  const chatStreamAbortRef = useRef<AbortController | null>(null);
+  // 古いレスポンスが新しいセッションに上書きしないようにするシーケンス番号
+  const chatRequestIdRef = useRef(0);
+
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   useEffect(() => {
     inputModeRef.current = inputMode;
@@ -1081,9 +1111,18 @@ function ChatPanel({
   const ttsStreamAbortRef = useRef<AbortController | null>(null);
   const ttsRequestIdRef = useRef(0);
   const ttsQueueRef = useRef<string[]>([]); // 残りテキストのキュー
+  // 連続再生用: 最後にスケジュールした AudioContext 再生時刻（もったり感対策）
+  const ttsNextPlayTimeRef = useRef(0);
+  const ttsActiveChainsRef = useRef(0);
+  // リップシンク用の AnalyserNode（TTS AudioContext と同一に接続）
+  const ttsAnalyserRef = useRef<AnalyserNode | null>(null);
+  // バージイン時のフェードアウト用: 現在再生中の {source, gain} を追跡
+  const ttsActiveSourcesRef = useRef<Array<{ source: AudioBufferSourceNode; gain: GainNode; endTime: number }>>([]);
 
   // 全ての音声を停止するヘルパー関数
-  const stopAllTts = useCallback(() => {
+  // options.fadeMs を指定すると自然にフェードアウト（バージイン時の唐突さ回避）
+  const stopAllTts = useCallback((options?: { fadeMs?: number }) => {
+    const fadeMs = options?.fadeMs ?? 0;
     // ブラウザTTSを停止
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       try {
@@ -1111,38 +1150,100 @@ function ChatPanel({
       }
       ttsAudioUrlRef.current = null;
     }
+    // スケジュール済み BufferSource をフェードアウトで停止
+    const ctx = ttsAudioCtxRef.current;
+    const now = ctx ? ctx.currentTime : 0;
+    const fadeSec = Math.max(0, fadeMs / 1000);
+    const active = ttsActiveSourcesRef.current;
+    ttsActiveSourcesRef.current = [];
+    for (const { source, gain } of active) {
+      try {
+        if (ctx && fadeSec > 0) {
+          gain.gain.cancelScheduledValues(now);
+          // 現在値から fadeSec で 0 にランプ
+          const cur = gain.gain.value;
+          gain.gain.setValueAtTime(cur, now);
+          gain.gain.linearRampToValueAtTime(0.0001, now + fadeSec);
+          source.stop(now + fadeSec + 0.02);
+        } else {
+          source.stop();
+        }
+      } catch {
+        // ignore: already stopped
+      }
+    }
     // ストリーミングTTSを中断（AudioContextは再利用するので close しない）
     ttsStreamAbortRef?.current?.abort();
     ttsStreamAbortRef.current = null;
     ttsQueueRef.current = [];
+    ttsNextPlayTimeRef.current = 0;
+    ttsActiveChainsRef.current = 0;
     ttsSpeakingRef.current = false;
     setTtsSpeaking(false);
   }, []);
 
+  // バージイン: ユーザーが喋り始めたら AI の発話・思考を即座に止めてユーザーの番にする
+  const triggerBargeIn = useCallback((reason: string) => {
+    console.log(`[barge-in] interrupting AI (${reason})`);
+    // 1. TTS フェードアウト停止（唐突に切れないように 150ms フェード）
+    stopAllTts({ fadeMs: 150 });
+    // 2. 進行中の chat-stream を中断
+    if (chatStreamAbortRef.current) {
+      try { chatStreamAbortRef.current.abort(); } catch { /* ignore */ }
+      chatStreamAbortRef.current = null;
+    }
+    // 3. 新しいシーケンスに切り替え（古いレスポンスは破棄される）
+    chatRequestIdRef.current += 1;
+    // 4. 保留中のトランスクリプトをクリア（重複送信を防ぐ）
+    pendingVoiceTranscriptRef.current = null;
+    // 5. 未完の assistant メッセージを履歴から除去（空または途中のものが残ると Gemini が
+    //    文脈を見失って一問一答化する）
+    setMessages((prev) => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      if (last.role === 'assistant' && (!last.text || last.text.trim().length < 4)) {
+        return prev.slice(0, -1);
+      }
+      return prev;
+    });
+    // 6. チャット状態を idle に戻す
+    setStatus('idle');
+    setError(null);
+    bargeInFrameCountRef.current = 0;
+  }, [stopAllTts]);
+
   const speakReply = useCallback(
-    (text: string, options?: { append?: boolean }) => {
+    (text: string, options?: { append?: boolean; chained?: boolean }) => {
       if (!ttsEnabled) return;
 
       // append モード: 現在再生中のTTSが終わったら次を再生するキューに追加
       if (options?.append) {
         ttsQueueRef.current.push(text);
         console.log(`[tts:queue] enqueued ${text.length} chars, queue size: ${ttsQueueRef.current.length}`);
+        // 何も再生中でない＆chainもアクティブでないならキュー消化を開始
+        if (ttsActiveChainsRef.current === 0 && !ttsSpeakingRef.current) {
+          const next = ttsQueueRef.current.shift();
+          if (next) speakReply(next, { chained: false });
+        }
         return;
       }
 
       setTtsError(null);
 
-      // 全ての音声を停止
-      stopAllTts();
-      // ストリーミング中の前リクエストをキャンセル
-      ttsStreamAbortRef.current?.abort();
-      ttsStreamAbortRef.current = null;
+      const chained = options?.chained === true;
+      if (!chained) {
+        // 新規発話: すべての音声を停止して状態リセット
+        stopAllTts();
+        ttsStreamAbortRef.current?.abort();
+        ttsStreamAbortRef.current = null;
+      }
 
       if (typeof window === 'undefined') return;
 
-      const requestId = ++ttsRequestIdRef.current;
+      const requestId = chained ? ttsRequestIdRef.current : ++ttsRequestIdRef.current;
       const abort = new AbortController();
       ttsStreamAbortRef.current = abort;
+      ttsActiveChainsRef.current += 1;
 
       // ブラウザTTSフォールバック
       const playBrowserTts = () => {
@@ -1163,15 +1264,6 @@ function ChatPanel({
         } catch { /* ignore */ }
       };
 
-      // キュー内の次のテキストを再生
-      const processQueue = () => {
-        const next = ttsQueueRef.current.shift();
-        if (next) {
-          console.log(`[tts:queue] playing next (${next.length} chars), remaining: ${ttsQueueRef.current.length}`);
-          speakReply(next);
-        }
-      };
-
       // ストリーミング再生: SSE で PCM チャンクを受け取り、AudioContext で即再生
       const playStreaming = async () => {
         // AudioContext をソースと同じ 24000Hz で作成（リサンプルによるノイズ回避）
@@ -1183,6 +1275,15 @@ function ChatPanel({
         if (audioCtx.state === 'suspended') {
           await audioCtx.resume();
         }
+        // リップシンク用 AnalyserNode（シングルトン）
+        if (!ttsAnalyserRef.current) {
+          const analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 256;
+          analyser.smoothingTimeConstant = 0.3;
+          analyser.connect(audioCtx.destination);
+          ttsAnalyserRef.current = analyser;
+        }
+        const analyser = ttsAnalyserRef.current;
 
         const response = await fetchWithAuth('/api/tts-stream', {
           method: 'POST',
@@ -1197,10 +1298,12 @@ function ChatPanel({
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
-        let nextPlayTime = audioCtx.currentTime;
+        // 連続再生: 前回のスケジュール終端から継続（もったり感対策）
+        let nextPlayTime = Math.max(audioCtx.currentTime, ttsNextPlayTimeRef.current);
         let started = false;
         let sampleRate = 24000;
         let sseBuffer = '';
+        let queueFired = false;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -1240,12 +1343,24 @@ function ChatPanel({
 
               const source = audioCtx.createBufferSource();
               source.buffer = audioBuf;
-              source.connect(audioCtx.destination);
+              // source → gain → analyser → destination（フェードアウト＋リップシンク用）
+              const gain = audioCtx.createGain();
+              source.connect(gain);
+              gain.connect(analyser);
 
               const now = audioCtx.currentTime;
               if (nextPlayTime < now) nextPlayTime = now;
               source.start(nextPlayTime);
-              nextPlayTime += audioBuf.duration;
+              const scheduledEnd = nextPlayTime + audioBuf.duration;
+              const sourceEntry = { source, gain, endTime: scheduledEnd };
+              ttsActiveSourcesRef.current.push(sourceEntry);
+              source.onended = () => {
+                const arr = ttsActiveSourcesRef.current;
+                const idx = arr.indexOf(sourceEntry);
+                if (idx >= 0) arr.splice(idx, 1);
+              };
+              nextPlayTime = scheduledEnd;
+              ttsNextPlayTimeRef.current = nextPlayTime;
 
               if (!started) {
                 started = true;
@@ -1256,18 +1371,29 @@ function ChatPanel({
                 (ttsAudioRef.current as any)._requestId = requestId;
               }
             } else if (evt.type === 'done') {
+              // 'done' が来た瞬間に次のキュー項目の取得を開始（間を詰める）
+              if (!queueFired) {
+                queueFired = true;
+                const next = ttsQueueRef.current.shift();
+                if (next && ttsRequestIdRef.current === requestId) {
+                  console.log(`[tts:queue] chaining next (${next.length} chars), remaining queue: ${ttsQueueRef.current.length}`);
+                  speakReply(next, { chained: true });
+                }
+              }
+              // このチェーンを終了。speaking 解除は最後のチェーンだけが行う
+              ttsActiveChainsRef.current = Math.max(0, ttsActiveChainsRef.current - 1);
               const remaining = Math.max(0, (nextPlayTime - audioCtx.currentTime) * 1000);
               setTimeout(() => {
-                if (ttsRequestIdRef.current === requestId) {
-                  // キューに次のテキストがあれば再生、なければ停止
-                  if (ttsQueueRef.current.length > 0) {
-                    processQueue();
-                  } else {
-                    ttsSpeakingRef.current = false;
-                    setTtsSpeaking(false);
-                  }
+                if (
+                  ttsRequestIdRef.current === requestId &&
+                  ttsActiveChainsRef.current === 0 &&
+                  ttsQueueRef.current.length === 0
+                ) {
+                  ttsSpeakingRef.current = false;
+                  setTtsSpeaking(false);
+                  ttsNextPlayTimeRef.current = 0;
                 }
-              }, remaining + 50);
+              }, remaining);
             } else if (evt.type === 'error') {
               throw new Error(evt.message || 'tts_stream_error');
             }
@@ -1276,10 +1402,13 @@ function ChatPanel({
       };
 
       playStreaming().catch((err) => {
+        ttsActiveChainsRef.current = Math.max(0, ttsActiveChainsRef.current - 1);
         if (abort.signal.aborted) return;
         if (ttsRequestIdRef.current !== requestId) return;
-        ttsSpeakingRef.current = false;
-        setTtsSpeaking(false);
+        if (ttsActiveChainsRef.current === 0) {
+          ttsSpeakingRef.current = false;
+          setTtsSpeaking(false);
+        }
         const detail = err instanceof Error ? err.message : String(err || '');
         console.warn('[tts:stream] failed, falling back to browser TTS:', detail);
         setTtsError(detail ? `音声ストリーミングに失敗: ${detail}` : '');
@@ -1664,6 +1793,12 @@ function ChatPanel({
       setStatus('running');
       setError(null);
 
+      // バージイン対応: このリクエストのシーケンス番号を払い出し、AbortController を紐付ける
+      const myRequestId = ++chatRequestIdRef.current;
+      const abortCtrl = new AbortController();
+      chatStreamAbortRef.current = abortCtrl;
+      const isStale = () => chatRequestIdRef.current !== myRequestId || abortCtrl.signal.aborted;
+
       // ストリーミングAPIを試行し、失敗したら通常APIにフォールバック
       const tryStreaming = async (): Promise<boolean> => {
         try {
@@ -1679,6 +1814,7 @@ function ChatPanel({
               msAccountId,
               geminiModel,
             }),
+            signal: abortCtrl.signal,
           });
 
           // 404の場合はフォールバック
@@ -1697,27 +1833,42 @@ function ChatPanel({
           }
 
           const decoder = new TextDecoder();
-          let fullReply = '';        // 生テキスト（表情タグ除去後、読み仮名あり）
+          let fullReply = '';        // 生テキスト（mode/表情タグ除去後、読み仮名あり）
           let rawTtsText = '';       // TTS用テキスト（読み仮名あり）
           let hasStartedTts = false;
           let pendingTtsText = '';   // まだ TTS に送っていないテキスト
-          let expressionParsed = false;
+          let tagsParsed = false;    // mode + 表情 タグ解析済みか
+          let replyMode: 'aizuchi' | 'respond' | 'silent' = 'respond';
+          let assistantMessageInserted = false;
 
-          // TTS を早く開始するため、句読点・文末・一定長で発話可能と判定
-          const isSpeakable = (txt: string) => {
+          // TTS を早く開始するための判定。モードによって閾値を変える。
+          // イントネーション崩れを避けるため、文末（。！？）での区切りを基本とし、
+          // 長い場合のみ読点で区切る。初回だけは早く発話したいので短めに許容。
+          const isSpeakable = (txt: string, mode: 'aizuchi' | 'respond' | 'silent', isFirst: boolean) => {
             const trimmed = txt.trim();
             if (!trimmed) return false;
+            if (mode === 'aizuchi') {
+              // 相槌は文末で区切る（「うん」「そうなんですね」）、または 6 文字以上
+              if (/[。！？\n]$/.test(trimmed)) return true;
+              return trimmed.length >= 6;
+            }
+            // respond: 文末で区切るのが最優先
             if (/[。！？\n]$/.test(trimmed)) return true;
-            if (/、$/.test(trimmed) && trimmed.length >= 15) return true;
-            if (trimmed.length >= 30) return true;
+            // 初回だけは 「、」 で早く始めて TTFA を詰める
+            if (isFirst && /、$/.test(trimmed) && trimmed.length >= 15) return true;
+            // 30 文字超えたら仕方なく区切る（読点がなくても）
+            if (trimmed.length >= 40) return true;
             return false;
           };
-
-          setMessages((prev) => [...prev, { id: assistantMessageId, role: 'assistant', text: '' }]);
 
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
+            // バージインされたら即座にストリーム終了
+            if (isStale()) {
+              try { reader.cancel(); } catch { /* ignore */ }
+              return true;
+            }
 
             const chunk = decoder.decode(value, { stream: true });
             const lines = chunk.split('\n');
@@ -1726,52 +1877,104 @@ function ChatPanel({
               if (line.startsWith('data: ')) {
                 try {
                   const data = JSON.parse(line.slice(6));
+                  if (isStale()) return true;
                   if (data.type === 'chunk' && data.text) {
                     fullReply += data.text;
 
-                    // 表情タグの解析（最初の1回のみ）
-                    if (!expressionParsed && fullReply.includes(']')) {
-                      const { expression, cleanText } = parseExpression(fullReply);
-                      setAvatarExpression(expression);
-                      rawTtsText = cleanText;
-                      pendingTtsText = cleanText;
-                      expressionParsed = true;
-                    } else if (expressionParsed) {
+                    // mode + 表情 タグの解析（最初の1回のみ）
+                    // プロンプトの指示: [mode:xxx][表情:yyy] の順で必ず先頭に付く
+                    if (!tagsParsed) {
+                      // [mode:xxx] が閉じているかチェック
+                      const modeEnd = fullReply.indexOf(']');
+                      if (modeEnd === -1) continue; // まだ mode タグ閉じてない
+                      // mode 解析
+                      const modeResult = parseMode(fullReply);
+                      replyMode = modeResult.mode;
+                      let afterMode = modeResult.cleanText;
+
+                      // silent モードはここで打ち切り。UI にも追加しない、TTS も鳴らさない
+                      if (replyMode === 'silent') {
+                        tagsParsed = true;
+                        rawTtsText = '';
+                        pendingTtsText = '';
+                        // ストリームの残りは読み飛ばす
+                        try { reader.cancel(); } catch { /* ignore */ }
+                        return true;
+                      }
+
+                      // respond / aizuchi は表情タグも消費してから本文を進める
+                      // 表情タグが完成していれば解析、まだなら次チャンクを待つ
+                      if (afterMode.includes(']')) {
+                        const expResult = parseExpression(afterMode);
+                        setAvatarExpression(expResult.expression);
+                        afterMode = expResult.cleanText;
+                        tagsParsed = true;
+                        rawTtsText = afterMode;
+                        pendingTtsText = afterMode;
+                      } else {
+                        // 表情タグがまだ来てない。次チャンク待ち
+                        continue;
+                      }
+                    } else {
                       rawTtsText += data.text;
                       pendingTtsText += data.text;
                     }
 
-                    // UI表示用: 読み仮名を除去
-                    setMessages((prev) =>
-                      prev.map((m) =>
-                        m.id === assistantMessageId ? { ...m, text: stripFurigana(rawTtsText) } : m
-                      )
-                    );
-
-                    // TTS 早期トリガー（最初のチャンク）
-                    if (!hasStartedTts && isSpeakable(pendingTtsText)) {
-                      hasStartedTts = true;
-                      speakReply(pendingTtsText.trim());
-                      pendingTtsText = '';
-                    }
-                  } else if (data.type === 'done') {
-                    // 表情タグが最後まで見つからなかった場合
-                    if (!expressionParsed) {
-                      const { expression, cleanText } = parseExpression(fullReply);
-                      setAvatarExpression(expression);
-                      rawTtsText = cleanText;
-                      pendingTtsText = cleanText;
+                    // UI表示用: メッセージ未挿入なら挿入（silent 以外）
+                    if (!assistantMessageInserted) {
+                      setMessages((prev) => [
+                        ...prev,
+                        { id: assistantMessageId, role: 'assistant', text: stripFurigana(rawTtsText) },
+                      ]);
+                      assistantMessageInserted = true;
+                    } else {
                       setMessages((prev) =>
                         prev.map((m) =>
                           m.id === assistantMessageId ? { ...m, text: stripFurigana(rawTtsText) } : m
                         )
                       );
                     }
+
+                    // TTS 早期トリガー
+                    if (!hasStartedTts && isSpeakable(pendingTtsText, replyMode, true)) {
+                      hasStartedTts = true;
+                      speakReply(pendingTtsText.trim());
+                      pendingTtsText = '';
+                    } else if (hasStartedTts && isSpeakable(pendingTtsText, replyMode, false)) {
+                      // 後続チャンクは文末区切りで append
+                      speakReply(pendingTtsText.trim(), { append: true });
+                      pendingTtsText = '';
+                    }
+                  } else if (data.type === 'done') {
+                    // silent でここまで来ることは通常ないが念のため
+                    if (replyMode === 'silent') break;
+
+                    // タグが最後まで見つからなかった場合のフォールバック
+                    if (!tagsParsed) {
+                      const modeResult = parseMode(fullReply);
+                      replyMode = modeResult.mode;
+                      if (replyMode === 'silent') break;
+                      const expResult = parseExpression(modeResult.cleanText);
+                      setAvatarExpression(expResult.expression);
+                      rawTtsText = expResult.cleanText;
+                      pendingTtsText = expResult.cleanText;
+                      if (!assistantMessageInserted) {
+                        setMessages((prev) => [
+                          ...prev,
+                          { id: assistantMessageId, role: 'assistant', text: stripFurigana(rawTtsText) },
+                        ]);
+                        assistantMessageInserted = true;
+                      } else {
+                        setMessages((prev) =>
+                          prev.map((m) =>
+                            m.id === assistantMessageId ? { ...m, text: stripFurigana(rawTtsText) } : m
+                          )
+                        );
+                      }
+                    }
                     if (!hasStartedTts && rawTtsText.trim()) {
-                      // TTS がまだ始まっていない → 全文を再生
                       speakReply(rawTtsText.trim());
                     } else if (hasStartedTts && pendingTtsText.trim()) {
-                      // 最初のチャンクは再生中 → 残りをキューに追加
                       speakReply(pendingTtsText.trim(), { append: true });
                     }
                   } else if (data.type === 'error') {
@@ -1790,6 +1993,11 @@ function ChatPanel({
 
           return true;
         } catch (err) {
+          // バージイン (AbortError) は正常扱い
+          if (err instanceof DOMException && err.name === 'AbortError') {
+            return true;
+          }
+          if (isStale()) return true;
           // ストリーミング固有のエラーはフォールバック
           if (err instanceof Error && err.message.includes('404')) {
             return false;
@@ -1814,6 +2022,20 @@ function ChatPanel({
         if (!reply) {
           throw new Error('reply was empty');
         }
+
+        // mode タグ解析（silent なら何も表示・再生せずに終了）
+        const serverMode = payload?.mode as string | undefined;
+        if (serverMode === 'silent') {
+          return;
+        }
+        if (serverMode === 'aizuchi' || serverMode === 'respond') {
+          // サーバーで strip 済み
+        } else {
+          const modeResult = parseMode(reply);
+          if (modeResult.mode === 'silent') return;
+          reply = modeResult.cleanText;
+        }
+
         // サーバーで解析済みの表情があればそれを使う、なければテキストから解析
         const serverExpression = payload?.expression as string | undefined;
         const validExpressions: ExpressionType[] = ['neutral', 'smile', 'happy', 'think', 'surprise', 'sad', 'shy'];
@@ -1831,17 +2053,24 @@ function ChatPanel({
 
       try {
         const streamingSucceeded = await tryStreaming();
+        if (isStale()) {
+          // バージインされた: status はすでに triggerBargeIn で idle に戻っている
+          return;
+        }
         if (!streamingSucceeded) {
           console.log('[chat] streaming not available, using fallback');
           await useFallback();
         }
+        if (isStale()) return;
         setStatus('idle');
       } catch (err) {
+        if (isStale()) return;
+        if (err instanceof DOMException && err.name === 'AbortError') return;
         setStatus('error');
         setError(err instanceof Error ? err.message : String(err));
       }
     },
-    [messages, speakReply, status, context, userInfo, faceAnalysisRealtime, msAccountId],
+    [messages, speakReply, status, context, userInfo, faceAnalysisRealtime, msAccountId, geminiModel, parseMode, parseExpression, stripFurigana],
   );
 
   useEffect(() => {
@@ -2087,15 +2316,58 @@ function ChatPanel({
         } else {
           channel = input.getChannelData(0);
         }
-        if (ttsSpeakingRef.current) {
-          return;
-        }
+
+        // 先に RMS を計算（バージイン判定に必要）
         let sum = 0;
         for (let i = 0; i < channel.length; i += 1) {
           const sample = channel[i];
           sum += sample * sample;
         }
         const rms = Math.sqrt(sum / channel.length);
+
+        // AI が喋っている／考えている間の処理
+        const aiBusy = ttsSpeakingRef.current || statusRef.current === 'running';
+        if (aiBusy) {
+          // バージイン検出: 高RMSが連続 BARGE_IN_CONSECUTIVE_FRAMES フレーム続いたら割り込み
+          if (rms > BARGE_IN_RMS_THRESHOLD) {
+            // 候補フレームをペイロード化して保留（頭切れ防止用）
+            const payloadCandidate = floatTo16LE(channel);
+            bargeInPendingFramesRef.current.push(payloadCandidate);
+            bargeInFrameCountRef.current += 1;
+            if (bargeInFrameCountRef.current >= BARGE_IN_CONSECUTIVE_FRAMES) {
+              triggerBargeIn('user started speaking');
+              // 保留していたフレームを Deepgram に flush（頭切れ防止）
+              const pending = bargeInPendingFramesRef.current;
+              bargeInPendingFramesRef.current = [];
+              const client = wsRef.current;
+              if (client && client.readyState === WebSocket.OPEN && wsReadyRef.current) {
+                for (const p of pending) {
+                  try { client.send(p); } catch { /* ignore */ }
+                }
+              } else {
+                // まだ ws 準備できていなければ prebuffer へ
+                prebufferRef.current.push(...pending);
+              }
+              // このフレームはもう送信済み相当なのでここで return
+              if (rms > AUTO_SEND_RMS_THRESHOLD) {
+                lastVoiceActivityRef.current = Date.now();
+                scheduleAutoSend();
+              }
+              return;
+            } else {
+              return; // まだ判定中、保留バッファに積むだけ
+            }
+          } else {
+            // 静音: カウンタと保留バッファをリセット
+            bargeInFrameCountRef.current = 0;
+            bargeInPendingFramesRef.current = [];
+            return;
+          }
+        } else {
+          bargeInFrameCountRef.current = 0;
+          bargeInPendingFramesRef.current = [];
+        }
+
         if (rms > AUTO_SEND_RMS_THRESHOLD) {
           lastVoiceActivityRef.current = Date.now();
           scheduleAutoSend();
@@ -2188,7 +2460,7 @@ function ChatPanel({
       setVoiceError(err instanceof Error ? err.message : String(err));
       finalizeVoiceCapture();
     }
-  }, [completeVoiceTranscript, disableVoice, finalizeVoiceCapture, status, voiceStatus, voiceSupported]);
+  }, [completeVoiceTranscript, disableVoice, finalizeVoiceCapture, status, voiceStatus, voiceSupported, triggerBargeIn]);
 
   // 事前準備フラグがtrueになったら音声キャプチャを開始（最初のスタートボタン押下時）
   useEffect(() => {
@@ -2286,6 +2558,7 @@ function ChatPanel({
                 autoSize
                 isSpeaking={ttsSpeaking}
                 audioElement={ttsAudioRef.current}
+                externalAnalyser={ttsAnalyserRef.current}
                 zoom={avatarZoom}
                 offsetY={avatarOffsetY}
                 expression={avatarExpression}
@@ -4450,6 +4723,14 @@ useEffect(() => {
         } catch (silentError) {
           console.warn('[auth] msal silent refresh failed', silentError);
         }
+      }
+      // Electron 以外（ブラウザ）では COOP でポップアップが壊れやすいので redirect flow を使う
+      if (!isElectron) {
+        await msalInstance.loginRedirect({
+          scopes: MSAL_LOGIN_SCOPES,
+          prompt: forceLogin ? 'login' : undefined,
+        });
+        return; // ページがリダイレクトされるのでここから先は到達しない
       }
       const result = await msalInstance.loginPopup({
         scopes: MSAL_LOGIN_SCOPES,

@@ -16,9 +16,13 @@ const configuredRedirectUri = (useAlt
   : import.meta.env.VITE_AZURE_REDIRECT_URI
   )?.trim();
 
+// ブラウザコンテキストでは window.location.origin を優先する。
+// Electron ビルドでは Node コンテキストなので window が無く、configuredRedirectUri を使う。
+// これにより Cloud Run / ローカル dev のどちらでも正しい redirectUri になる（Azure AD に両方登録済み前提）
 export const MSAL_REDIRECT_URI =
-  configuredRedirectUri ||
-  (typeof window !== 'undefined' ? window.location.origin : 'http://localhost');
+  typeof window !== 'undefined' && window.location?.origin
+    ? window.location.origin
+    : (configuredRedirectUri || 'http://localhost');
 
 export const MSAL_ENABLED = Boolean(clientId && tenantId);
 

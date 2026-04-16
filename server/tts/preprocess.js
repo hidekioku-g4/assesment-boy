@@ -88,9 +88,13 @@ function applyKuromojiReadings(text) {
 export function preprocessTtsText(text) {
   let result = text;
 
-  // 1. Geminiの読み仮名アノテーション処理: 山田太郎《やまだたろう》 → やまだたろう
+  // 1. Geminiの読み仮名アノテーション処理: 打ち間違い《うちまちがい》 → うちまちがい
+  //    先頭は漢字/カタカナ必須（ひらがな始まりで誤マッチ防止）、以降は送り仮名（ひらがな）も許容
   const beforeFurigana = result;
-  result = result.replace(/[\u4E00-\u9FFF\u30A0-\u30FFー]+《([^》]+)》/g, '$1');
+  result = result.replace(
+    /[\u4E00-\u9FFF\u30A0-\u30FFー][\u3040-\u309F\u4E00-\u9FFF\u30A0-\u30FFー]*《([^》]+)》/g,
+    '$1'
+  );
   if (beforeFurigana !== result) {
     console.log(`[tts] furigana処理: "${beforeFurigana.slice(0, 80)}" → "${result.slice(0, 80)}"`);
   }

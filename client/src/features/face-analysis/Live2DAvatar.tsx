@@ -64,6 +64,7 @@ type Props = {
   height?: number;
   isSpeaking?: boolean;
   audioElement?: HTMLAudioElement | null;
+  externalAnalyser?: AnalyserNode | null;
   onError?: (error: string) => void;
   zoom?: number;
   offsetY?: number;
@@ -77,6 +78,7 @@ export function Live2DAvatar({
   height: propHeight,
   isSpeaking = false,
   audioElement,
+  externalAnalyser,
   onError,
   zoom = 1.0,
   offsetY = 0,
@@ -284,11 +286,12 @@ export function Live2DAvatar({
         }
       }
 
-      // リップシンク
-      if (isSpeaking && analyserRef.current) {
+      // リップシンク: 外部 analyser（TTS ストリーミング用）を優先、なければ audioElement 経由
+      const activeAnalyser = externalAnalyser || analyserRef.current;
+      if (isSpeaking && activeAnalyser) {
         if (coreModel) {
-          const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
-          analyserRef.current.getByteFrequencyData(dataArray);
+          const dataArray = new Uint8Array(activeAnalyser.frequencyBinCount);
+          activeAnalyser.getByteFrequencyData(dataArray);
           const voiceRange = dataArray.slice(2, 15);
           const avg = voiceRange.reduce((a, b) => a + b, 0) / voiceRange.length;
           const mouthOpen = avg > 30 ? Math.min(1, (avg - 30) / 80) : 0;
@@ -307,7 +310,7 @@ export function Live2DAvatar({
     return () => {
       PIXI.Ticker.shared.remove(tickerCallback);
     };
-  }, [isLoaded, isSpeaking]);
+  }, [isLoaded, isSpeaking, externalAnalyser]);
 
   // オーディオ接続
   useEffect(() => {
