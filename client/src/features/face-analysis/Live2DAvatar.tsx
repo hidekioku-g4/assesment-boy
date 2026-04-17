@@ -302,6 +302,12 @@ export function Live2DAvatar({
             // ignore
           }
         }
+      } else if (coreModel) {
+        try {
+          coreModel.setParameterValueById('ParamMouthOpenY', 0, 1);
+        } catch {
+          // ignore
+        }
       }
     };
 

@@ -85,22 +85,38 @@ function applyKuromojiReadings(text) {
   return result;
 }
 
-export function preprocessTtsText(text) {
+/**
+ * @param {string} text
+ * @param {{ skipKuromoji?: boolean, keepKanji?: boolean }} options
+ *   - skipKuromoji: kuromoji 形態素解析をスキップ（Chirp 3 HD / Gemini TTS 用）
+ *   - keepKanji: ふりがなアノテーションの漢字を残す（LLM ベース TTS 用）
+ *     true:  漢字《よみ》 → 漢字（漢字を残して抑揚を維持）
+ *     false: 漢字《よみ》 → よみ（Cartesia 等の旧 TTS 用）
+ */
+export function preprocessTtsText(text, options = {}) {
+  const { skipKuromoji = false, keepKanji = false } = options;
   let result = text;
 
-  // 1. Geminiの読み仮名アノテーション処理: 打ち間違い《うちまちがい》 → うちまちがい
-  //    先頭は漢字/カタカナ必須（ひらがな始まりで誤マッチ防止）、以降は送り仮名（ひらがな）も許容
+  // 1. Geminiの読み仮名アノテーション処理
   const beforeFurigana = result;
-  result = result.replace(
-    /[\u4E00-\u9FFF\u30A0-\u30FFー][\u3040-\u309F\u4E00-\u9FFF\u30A0-\u30FFー]*《([^》]+)》/g,
-    '$1'
-  );
+  if (keepKanji) {
+    // LLM ベース TTS: 漢字を残し、《よみ》アノテーションだけ除去
+    // 漢字から文脈を読んで自然な抑揚をつけるため
+    result = result.replace(/《[^》]+》/g, '');
+  } else {
+    // 旧 TTS: 漢字《よみ》 → よみ に置換
+    result = result.replace(
+      /[\u4E00-\u9FFF\u30A0-\u30FFー][\u3040-\u309F\u4E00-\u9FFF\u30A0-\u30FFー]*《([^》]+)》/g,
+      '$1'
+    );
+  }
   if (beforeFurigana !== result) {
-    console.log(`[tts] furigana処理: "${beforeFurigana.slice(0, 80)}" → "${result.slice(0, 80)}"`);
+    console.log(`[tts] furigana処理(keepKanji=${keepKanji}): "${beforeFurigana.slice(0, 80)}" → "${result.slice(0, 80)}"`);
   }
 
   // 2. kuromoji で固有名詞の漢字を読みに変換
-  if (tokenizerReady) {
+  //    Chirp 3 HD / Gemini TTS など文脈を正しく読めるTTSでは skip する
+  if (!skipKuromoji && tokenizerReady) {
     const beforeKuromoji = result;
     result = applyKuromojiReadings(result);
     if (beforeKuromoji !== result) {
@@ -108,7 +124,7 @@ export function preprocessTtsText(text) {
     }
   }
 
-  // 3. 辞書による置換
+  // 3. 辞書による置換（誤読する固有名詞の補正用）
   for (const [word, pronunciation] of Object.entries(TTS_PRONUNCIATION_MAP)) {
     result = result.replaceAll(word, pronunciation);
   }

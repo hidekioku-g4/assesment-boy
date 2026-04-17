@@ -951,12 +951,16 @@ function ChatPanel({
   const storageKeyRef = useRef(initialStorageKey);
   // 起動時は過去のログを読み込まない（新鮮な状態で開始）
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const chatMessagesRef = useRef<ChatMessage[]>([]);
+  chatMessagesRef.current = messages;
   const [chatStarted, setChatStarted] = useState(false);
   const [chatEnding, setChatEnding] = useState(false);
   // セッション保存用
   const sessionIdRef = useRef<string | null>(null);
   const lastSavedMessageCountRef = useRef(0);
   const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoSavedAtRef = useRef(0);
+  const autoSavingRef = useRef(false);
   const [input, setInput] = useState('');
   const [status, setStatus] = useState<ChatStatus>('idle');
   const [error, setError] = useState<string | null>(null);
@@ -966,12 +970,13 @@ function ChatPanel({
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [ttsEnabled, setTtsEnabled] = useState(true);
   const [ttsSpeed, setTtsSpeed] = useState(1.5);
-  const [ttsVoice, setTtsVoice] = useState('59d4fd2f-f5eb-4410-8105-58db7661144f'); // Yuki
+  const [ttsVoice, setTtsVoice] = useState('ja-JP-Chirp3-HD-Leda'); // Chirp 3 HD 女性・優しい
+  const [ttsProvider, setTtsProvider] = useState<'google' | 'gemini'>('google'); // A/B比較用
   const [ttsVoiceOptions, setTtsVoiceOptions] = useState<{ id: string; name: string }[]>([]);
   const [ttsSpeaking, setTtsSpeaking] = useState(false);
   const [ttsError, setTtsError] = useState<string | null>(null);
   // AIモデル切替（ABテスト用）
-  const [geminiModel, setGeminiModel] = useState('gemini-2.0-flash');
+  const [geminiModel, setGeminiModel] = useState('gemini-2.5-flash');
   // 顔分析関連（デフォルトON）
   const [faceAnalysisEnabled, setFaceAnalysisEnabled] = useState(true);
   const [faceAnalysisSummary, setFaceAnalysisSummary] = useState<AnalysisSummary | null>(null);
@@ -1048,6 +1053,7 @@ function ChatPanel({
   const ttsAudioUrlRef = useRef<string | null>(null);
   const ttsVoiceRef = useRef(ttsVoice);
   const ttsSpeedRef = useRef(ttsSpeed);
+  const ttsProviderRef = useRef(ttsProvider);
   const lastVoiceActivityRef = useRef(0);
   const voiceStatusRef = useRef<'idle' | 'listening' | 'sending' | 'error'>(voiceStatus);
   const inputModeRef = useRef(inputMode);
@@ -1101,6 +1107,10 @@ function ChatPanel({
   useEffect(() => {
     ttsSpeedRef.current = ttsSpeed;
   }, [ttsSpeed]);
+
+  useEffect(() => {
+    ttsProviderRef.current = ttsProvider;
+  }, [ttsProvider]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -1288,7 +1298,7 @@ function ChatPanel({
         const response = await fetchWithAuth('/api/tts-stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, speakingRate: ttsSpeedRef.current, voice: ttsVoiceRef.current }),
+          body: JSON.stringify({ text, speakingRate: ttsSpeedRef.current, voice: ttsVoiceRef.current, provider: ttsProviderRef.current }),
           signal: abort.signal,
         });
 
@@ -1435,6 +1445,8 @@ function ChatPanel({
     // セッションID生成
     sessionIdRef.current = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     lastSavedMessageCountRef.current = 0;
+    autoSavedAtRef.current = 0;
+    autoSavingRef.current = false;
 
     // 議題提案またはデフォルトメッセージを表示
     const messageText = initialMessage || 'はじめまして！今日からよろしくお願いします。もしよかったら、あなたのことを教えていただけますか？好きなことや趣味、どんなことに興味があるかなど、何でも大丈夫です！';
@@ -1535,6 +1547,7 @@ function ChatPanel({
     // セッションリセット
     sessionIdRef.current = null;
     lastSavedMessageCountRef.current = 0;
+    autoSavedAtRef.current = 0;
   }, []);
 
   // 会話終了ボタンのハンドラー
@@ -1542,46 +1555,50 @@ function ChatPanel({
     if (chatEnding || !msAccountId) return;
     setChatEnding(true);
 
-    // 会話履歴をテキストにまとめる
-    const chatText = messages
-      .map((m) => `${m.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${m.text}`)
-      .join('\n');
+    // 自動保存済みで新しいメッセージがなければAPI呼び出しをスキップ
+    const alreadySaved = autoSavedAtRef.current >= messages.length && messages.length > 0;
 
-    try {
-      // セッション要約を生成・保存
-      await fetchWithAuth('/api/session-summary', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          msAccountId,
-          cleanedText: chatText,
-          supportRecordJson: '',
-          meetingTypeId: null,
-          meetingTypeName: '会話セッション',
-          facilitatorId: null,
-          facilitatorName: null,
-          talentId: null,
-          talentName: userInfo.name || null,
-          sessionDate: new Date().toISOString().slice(0, 10),
-        }),
-      });
-      console.log('[chat] session summary saved');
-    } catch (err) {
-      console.warn('[chat] failed to save session summary', err);
+    if (!alreadySaved) {
+      const chatText = messages
+        .map((m) => `${m.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${m.text}`)
+        .join('\n');
+
+      try {
+        await fetchWithAuth('/api/session-summary', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            msAccountId,
+            cleanedText: chatText,
+            supportRecordJson: '',
+            meetingTypeId: null,
+            meetingTypeName: '会話セッション',
+            facilitatorId: null,
+            facilitatorName: null,
+            talentId: null,
+            talentName: userInfo.name || null,
+            sessionDate: new Date().toISOString().slice(0, 10),
+          }),
+        });
+        console.log('[chat] session summary saved');
+      } catch (err) {
+        console.warn('[chat] failed to save session summary', err);
+      }
+    } else {
+      console.log('[chat] session already auto-saved, skipping summary API call');
     }
 
     // 顔分析が有効でサマリーがある場合はフィードバックモーダルを表示
     if (faceAnalysisEnabled && faceAnalysisSummary && faceAnalysisSummary.totalFrames > 0) {
       setShowSessionFeedback(true);
-      // モーダルを閉じるときにチャットをリセット
     } else {
-      // チャットをリセット
       setChatStarted(false);
       setMessages([]);
     }
     // セッションリセット
     sessionIdRef.current = null;
     lastSavedMessageCountRef.current = 0;
+    autoSavedAtRef.current = 0;
     setChatEnding(false);
   }, [chatEnding, msAccountId, messages, userInfo.name, faceAnalysisEnabled, faceAnalysisSummary]);
 
@@ -1622,6 +1639,46 @@ function ChatPanel({
     lastSavedMessageCountRef.current = messages.length;
   }, [msAccountId, messages, userInfo.name]);
 
+  // タブ非表示時の自動保存（AI要約付き）
+  const autoSaveSession = useCallback(async () => {
+    const currentMessages = chatMessagesRef.current;
+    if (!msAccountId || currentMessages.length < 3 || autoSavingRef.current) return;
+    if (autoSavedAtRef.current >= currentMessages.length) return;
+
+    autoSavingRef.current = true;
+
+    const chatText = currentMessages
+      .map((m) => `${m.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${m.text}`)
+      .join('\n');
+
+    try {
+      await fetchWithAuth('/api/session-summary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          msAccountId,
+          cleanedText: chatText,
+          supportRecordJson: '',
+          meetingTypeId: null,
+          meetingTypeName: '会話セッション',
+          facilitatorId: null,
+          facilitatorName: null,
+          talentId: null,
+          talentName: userInfo.name || null,
+          sessionDate: new Date().toISOString().slice(0, 10),
+        }),
+        keepalive: true,
+      });
+      autoSavedAtRef.current = currentMessages.length;
+      lastSavedMessageCountRef.current = currentMessages.length;
+      console.log(`[chat] auto-save completed (messages:${currentMessages.length})`);
+    } catch (err) {
+      console.warn('[chat] auto-save failed', err);
+    } finally {
+      autoSavingRef.current = false;
+    }
+  }, [msAccountId, userInfo.name]);
+
   // 60秒ごとの定期保存（差分がある場合のみ）
   useEffect(() => {
     if (!chatStarted || !msAccountId) {
@@ -1646,17 +1703,23 @@ function ChatPanel({
     };
   }, [chatStarted, msAccountId, messages.length, sendHeartbeat]);
 
-  // ページ閉じ/リロード時にハートビート送信
+  // ページ閉じ/リロード時の保存
   useEffect(() => {
     const handleBeforeUnload = () => {
       if (chatStarted && messages.length > 0) {
-        sendHeartbeat(true); // 最終保存
+        sendHeartbeat(true);
       }
     };
 
     const handleVisibilityChange = () => {
-      // タブが非表示になった時も保存（モバイル対応）
-      if (document.visibilityState === 'hidden' && chatStarted && messages.length > lastSavedMessageCountRef.current) {
+      if (document.visibilityState !== 'hidden' || !chatStarted) return;
+      const currentMessages = chatMessagesRef.current;
+      // 3メッセージ以上あればAI要約付き自動保存
+      if (currentMessages.length >= 3 && autoSavedAtRef.current < currentMessages.length) {
+        autoSaveSession();
+      }
+      // ハートビートも送る（sendBeaconで即時・確実）
+      if (currentMessages.length > lastSavedMessageCountRef.current) {
         sendHeartbeat(false);
       }
     };
@@ -1668,7 +1731,7 @@ function ChatPanel({
       window.removeEventListener('beforeunload', handleBeforeUnload);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [chatStarted, messages.length, sendHeartbeat]);
+  }, [chatStarted, messages.length, sendHeartbeat, autoSaveSession]);
 
   useEffect(() => {
     if (!ttsEnabled) {
@@ -1786,7 +1849,7 @@ function ChatPanel({
         setMessages([]);
       }
 
-      const history = buildChatContext(shouldReset ? [] : messages);
+      const history = buildChatContext(shouldReset ? [] : chatMessagesRef.current);
       const userMessage: ChatMessage = { id: createChatId(), role: 'user', text };
       const assistantMessageId = createChatId();
       setMessages((prev) => (shouldReset ? [userMessage] : [...prev, userMessage]));
@@ -1855,7 +1918,7 @@ function ChatPanel({
             // respond: 文末で区切るのが最優先
             if (/[。！？\n]$/.test(trimmed)) return true;
             // 初回だけは 「、」 で早く始めて TTFA を詰める
-            if (isFirst && /、$/.test(trimmed) && trimmed.length >= 15) return true;
+            if (isFirst && /、$/.test(trimmed) && trimmed.length >= 10) return true;
             // 30 文字超えたら仕方なく区切る（読点がなくても）
             if (trimmed.length >= 40) return true;
             return false;
@@ -2070,7 +2133,7 @@ function ChatPanel({
         setError(err instanceof Error ? err.message : String(err));
       }
     },
-    [messages, speakReply, status, context, userInfo, faceAnalysisRealtime, msAccountId, geminiModel, parseMode, parseExpression, stripFurigana],
+    [speakReply, status, context, userInfo, faceAnalysisRealtime, msAccountId, geminiModel, parseMode, parseExpression, stripFurigana],
   );
 
   useEffect(() => {
@@ -2624,6 +2687,17 @@ function ChatPanel({
                       className="flex-1 cursor-pointer"
                     />
                     <span className="w-10 text-right">{avatarOffsetY}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="w-16">TTS:</span>
+                    <select
+                      value={ttsProvider}
+                      onChange={(e) => setTtsProvider(e.target.value as 'google' | 'gemini')}
+                      className="flex-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs"
+                    >
+                      <option value="google">Chirp 3 HD (安定)</option>
+                      <option value="gemini">Gemini 3.1 Flash TTS (実験)</option>
+                    </select>
                   </div>
                   {ttsVoiceOptions.length > 0 && (
                     <div className="flex items-center gap-2">

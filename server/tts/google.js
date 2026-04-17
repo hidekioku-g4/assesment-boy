@@ -1,24 +1,29 @@
-// server/tts/google.js — Google Cloud TTS プロバイダ
+// server/tts/google.js — Google Cloud TTS プロバイダ（Chirp 3 HD デフォルト）
 import path from 'path';
 
-const TTS_VOICE_NAME = process.env.TTS_VOICE_NAME || 'ja-JP-Neural2-B';
+const TTS_VOICE_NAME = process.env.TTS_VOICE_NAME || 'ja-JP-Chirp3-HD-Leda';
 const TTS_LANGUAGE_CODE = process.env.TTS_LANGUAGE_CODE || 'ja-JP';
 const TTS_AUDIO_ENCODING = process.env.TTS_AUDIO_ENCODING || 'MP3';
-const TTS_SPEAKING_RATE = Number(process.env.TTS_SPEAKING_RATE ?? 1.25);
+const TTS_SPEAKING_RATE = Number(process.env.TTS_SPEAKING_RATE ?? 1.0);
 const TTS_PITCH = Number(process.env.TTS_PITCH ?? 0);
 
+// Chirp 3 HD 日本語ボイス（試聴用に代表的なものを厳選）
+// 全30種は /api/tts/voices?all=1 で取得可能
 const TTS_VOICE_OPTIONS = [
-  { id: 'ja-JP-Neural2-B', name: 'Neural2-B (女性・標準)', gender: 'FEMALE' },
-  { id: 'ja-JP-Neural2-C', name: 'Neural2-C (男性)', gender: 'MALE' },
-  { id: 'ja-JP-Neural2-D', name: 'Neural2-D (男性・低め)', gender: 'MALE' },
-  { id: 'ja-JP-Wavenet-A', name: 'Wavenet-A (女性)', gender: 'FEMALE' },
-  { id: 'ja-JP-Wavenet-B', name: 'Wavenet-B (女性・落ち着き)', gender: 'FEMALE' },
-  { id: 'ja-JP-Wavenet-C', name: 'Wavenet-C (男性)', gender: 'MALE' },
-  { id: 'ja-JP-Wavenet-D', name: 'Wavenet-D (男性・落ち着き)', gender: 'MALE' },
-  { id: 'ja-JP-Standard-A', name: 'Standard-A (女性・軽量)', gender: 'FEMALE' },
-  { id: 'ja-JP-Standard-B', name: 'Standard-B (女性)', gender: 'FEMALE' },
-  { id: 'ja-JP-Standard-C', name: 'Standard-C (男性)', gender: 'MALE' },
-  { id: 'ja-JP-Standard-D', name: 'Standard-D (男性)', gender: 'MALE' },
+  // 女性声（面談向けに落ち着き・親しみやすさ重視で選定）
+  { id: 'ja-JP-Chirp3-HD-Leda', name: 'Leda (女性・優しい)', gender: 'FEMALE' },
+  { id: 'ja-JP-Chirp3-HD-Kore', name: 'Kore (女性・明るい)', gender: 'FEMALE' },
+  { id: 'ja-JP-Chirp3-HD-Aoede', name: 'Aoede (女性・落ち着き)', gender: 'FEMALE' },
+  { id: 'ja-JP-Chirp3-HD-Autonoe', name: 'Autonoe (女性・はきはき)', gender: 'FEMALE' },
+  { id: 'ja-JP-Chirp3-HD-Callirrhoe', name: 'Callirrhoe (女性・柔らかい)', gender: 'FEMALE' },
+  { id: 'ja-JP-Chirp3-HD-Sulafat', name: 'Sulafat (女性・温かみ)', gender: 'FEMALE' },
+  { id: 'ja-JP-Chirp3-HD-Vindemiatrix', name: 'Vindemiatrix (女性・知的)', gender: 'FEMALE' },
+  // 男性声
+  { id: 'ja-JP-Chirp3-HD-Charon', name: 'Charon (男性・落ち着き)', gender: 'MALE' },
+  { id: 'ja-JP-Chirp3-HD-Enceladus', name: 'Enceladus (男性・優しい)', gender: 'MALE' },
+  { id: 'ja-JP-Chirp3-HD-Orus', name: 'Orus (男性・はきはき)', gender: 'MALE' },
+  { id: 'ja-JP-Chirp3-HD-Puck', name: 'Puck (男性・明るい)', gender: 'MALE' },
+  { id: 'ja-JP-Chirp3-HD-Algieba', name: 'Algieba (男性・温かみ)', gender: 'MALE' },
 ];
 
 const resolveCredentialPath = (value) => {
@@ -62,7 +67,8 @@ const getTtsClient = async () => {
  * @returns {Promise<{ buffer: Buffer, contentType: string }>}
  */
 export async function synthesize(text, { speed, voice, pitch } = {}) {
-  const voiceName = TTS_VOICE_OPTIONS.some(v => v.id === voice) ? voice : TTS_VOICE_NAME;
+  const voiceName = (typeof voice === 'string' && voice.startsWith('ja-JP-')) ? voice : TTS_VOICE_NAME;
+  const isChirp3 = voiceName.includes('Chirp3');
   const speakingRate = Number.isFinite(speed) && speed > 0
     ? Math.max(0.5, Math.min(2.0, speed))
     : TTS_SPEAKING_RATE;
@@ -78,7 +84,8 @@ export async function synthesize(text, { speed, voice, pitch } = {}) {
   if (Number.isFinite(speakingRate) && speakingRate > 0) {
     audioConfig.speakingRate = speakingRate;
   }
-  if (Number.isFinite(pitchVal)) {
+  // Chirp 3 HD は pitch 非対応。Neural2/Wavenet/Standard のみに適用
+  if (!isChirp3 && Number.isFinite(pitchVal)) {
     audioConfig.pitch = pitchVal;
   }
 

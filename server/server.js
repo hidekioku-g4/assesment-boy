@@ -21,7 +21,18 @@ import { getMetaSummaryPrompt } from './prompts/meta-summary.js';
 import { fetchParticipants, insertSupportRecord, insertSessionSummary, fetchSessionSummaries, fetchUserProfile, upsertUserProfile, countSessionSummaries, fetchSuggestedTopics } from './bigquery.js';
 import { synthesize as ttsSynthesize, getVoices as ttsGetVoices } from './tts/index.js';
 import { preprocessTtsText, warmupTokenizer } from './tts/preprocess.js';
-import { synthesizeStream as ttsStream, warmup as ttsWarmup, STREAM_SAMPLE_RATE } from './tts/cartesia-stream.js';
+import { synthesizeStream as cartesiaStream, warmup as cartesiaWarmup, STREAM_SAMPLE_RATE as CARTESIA_STREAM_SR } from './tts/cartesia-stream.js';
+import { synthesizeStream as googleStream, warmup as googleStreamWarmup, STREAM_SAMPLE_RATE as GOOGLE_STREAM_SR } from './tts/google-stream.js';
+import { synthesizeStream as geminiStream, warmup as geminiWarmup, STREAM_SAMPLE_RATE as GEMINI_STREAM_SR } from './tts/gemini.js';
+
+const TTS_PROVIDER = process.env.TTS_PROVIDER || 'google';
+const STREAM_IMPLS = {
+  cartesia: { stream: cartesiaStream, warmup: cartesiaWarmup, sampleRate: CARTESIA_STREAM_SR },
+  google: { stream: googleStream, warmup: googleStreamWarmup, sampleRate: GOOGLE_STREAM_SR },
+  gemini: { stream: geminiStream, warmup: geminiWarmup, sampleRate: GEMINI_STREAM_SR },
+};
+const defaultStreamImpl = STREAM_IMPLS[TTS_PROVIDER] || STREAM_IMPLS.google;
+const ttsWarmup = defaultStreamImpl.warmup;
 import { requireAuth, verifyWsToken } from './auth-middleware.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1122,9 +1133,13 @@ app.post('/api/chat-stream', async (req, res) => {
     ];
     const geminiStart = Date.now();
 
+    const isThinkingModel = chatModel.includes('2.5');
     const stream = await genAI.models.generateContentStream({
       model: chatModel,
-      config: { systemInstruction },
+      config: {
+        systemInstruction,
+        ...(isThinkingModel && { thinkingConfig: { thinkingBudget: 0 } }),
+      },
       contents,
     });
 
@@ -1194,8 +1209,10 @@ app.get('/api/tts/voices', (req, res) => {
 
 app.post('/api/tts', async (req, res) => {
   const raw = typeof req.body?.text === 'string' ? req.body.text : '';
+  const requestedVoice = typeof req.body?.voice === 'string' ? req.body.voice.trim() : '';
+  const isLlmTts = requestedVoice.includes('Chirp3') || (process.env.TTS_VOICE_NAME || '').includes('Chirp3') || TTS_PROVIDER === 'gemini';
   console.log(`[tts] 受信テキスト: "${raw.slice(0, 100)}"`);
-  const preprocessed = preprocessTtsText(raw.trim());
+  const preprocessed = preprocessTtsText(raw.trim(), { skipKuromoji: isLlmTts, keepKanji: isLlmTts });
   console.log(`[tts] 処理後テキスト: "${preprocessed.slice(0, 100)}"`);
   const text = preprocessed.slice(0, Math.max(1, TTS_MAX_CHARS));
   if (!text) {
@@ -1206,7 +1223,6 @@ app.post('/api/tts', async (req, res) => {
   const speed = Number.isFinite(requestedRate) && requestedRate > 0
     ? Math.max(0.5, Math.min(2.0, requestedRate))
     : undefined;
-  const requestedVoice = typeof req.body?.voice === 'string' ? req.body.voice.trim() : undefined;
   const requestedPitch = Number(req.body?.pitch);
   const pitch = Number.isFinite(requestedPitch)
     ? Math.max(-20, Math.min(20, requestedPitch))
@@ -1215,7 +1231,7 @@ app.post('/api/tts', async (req, res) => {
   console.log(`[tts] start (len:${text.length}, speed:${speed}, voice:${requestedVoice}, pitch:${pitch})`);
 
   try {
-    const { buffer, contentType } = await ttsSynthesize(text, { speed, voice: requestedVoice, pitch });
+    const { buffer, contentType } = await ttsSynthesize(text, { speed, voice: requestedVoice || undefined, pitch });
     res.setHeader('Content-Type', contentType);
     res.send(buffer);
   } catch (error) {
@@ -1234,7 +1250,13 @@ app.post('/api/tts-stream', async (req, res) => {
   if (!text) {
     return res.status(400).json({ error: 'text is required' });
   }
-  if (!process.env.CARTESIA_API_KEY) {
+
+  // クライアントからの provider オーバーライド（A/B比較用）
+  const requestedProvider = typeof req.body?.provider === 'string' ? req.body.provider.trim() : '';
+  const impl = STREAM_IMPLS[requestedProvider] || defaultStreamImpl;
+  const activeProvider = STREAM_IMPLS[requestedProvider] ? requestedProvider : TTS_PROVIDER;
+
+  if (activeProvider === 'cartesia' && !process.env.CARTESIA_API_KEY) {
     return res.status(500).json({ error: 'CARTESIA_API_KEY not configured' });
   }
 
@@ -1250,10 +1272,10 @@ app.post('/api/tts-stream', async (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
 
   // サンプルレート情報を最初に送る
-  res.write(`data: ${JSON.stringify({ type: 'info', sampleRate: STREAM_SAMPLE_RATE })}\n\n`);
+  res.write(`data: ${JSON.stringify({ type: 'info', sampleRate: impl.sampleRate, provider: activeProvider })}\n\n`);
 
   try {
-    await ttsStream(text, {
+    await impl.stream(text, {
       speed,
       voice,
       onChunk: (base64Data) => {
@@ -1781,6 +1803,28 @@ app.post('/api/session-summary', async (req, res) => {
     });
 
     console.log(`[session-summary] saved (id:${summaryId})`);
+
+    if (parsed.preferredName && msAccountId) {
+      try {
+        const currentProfile = await fetchUserProfile({ msAccountId });
+        const newNotes = `呼び方: ${parsed.preferredName}`;
+        if ((currentProfile?.notes || '') !== newNotes) {
+          await upsertUserProfile({
+            msAccountId,
+            metaSummary: currentProfile?.metaSummary || '',
+            keyFacts: currentProfile?.keyFacts || '',
+            interests: currentProfile?.interests || '',
+            goals: currentProfile?.goals || '',
+            notes: newNotes,
+            lastSummaryCount: currentProfile?.lastSummaryCount || 0,
+          });
+          console.log(`[session-summary] preferredName saved: ${parsed.preferredName}`);
+        }
+      } catch (err) {
+        console.warn('[session-summary] preferredName save failed:', err.message);
+      }
+    }
+
     res.json({ ok: true, summaryId, summary: parsed });
   } catch (error) {
     const message = error?.message || String(error);
@@ -1919,6 +1963,7 @@ const checkAndUpdateMetaSummary = async (msAccountId, summaries) => {
         parsed.keyFacts = Array.isArray(json.keyFacts) ? JSON.stringify(json.keyFacts) : (json.keyFacts || '');
         parsed.interests = json.interests || '';
         parsed.goals = json.goals || '';
+        if (json.notes) parsed.notes = json.notes;
       }
     } catch (parseErr) {
       console.warn('[meta-summary] JSON parse failed, using raw text');
@@ -1932,7 +1977,7 @@ const checkAndUpdateMetaSummary = async (msAccountId, summaries) => {
       keyFacts: parsed.keyFacts,
       interests: parsed.interests,
       goals: parsed.goals,
-      notes: currentProfile?.notes || '',
+      notes: parsed.notes || currentProfile?.notes || '',
       lastSummaryCount: currentCount,
     });
 

@@ -1,11 +1,12 @@
-// server/tts/index.js — TTS プロバイダルーター（Cartesia / Google 切替 + フォールバック）
+// server/tts/index.js — TTS プロバイダルーター（Cartesia / Google / Gemini 切替 + フォールバック）
 import * as cartesia from './cartesia.js';
 import * as google from './google.js';
+import * as gemini from './gemini.js';
 
-const provider = process.env.TTS_PROVIDER || 'cartesia';
+const provider = process.env.TTS_PROVIDER || 'google';
 const fallback = process.env.TTS_FALLBACK || '';
 
-const providers = { cartesia, google };
+const providers = { cartesia, google, gemini };
 
 function getProvider(name) {
   const p = providers[name];
