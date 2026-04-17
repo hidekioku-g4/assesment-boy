@@ -1,0 +1,7 @@
+# assess-kun: npm audit で無視する脆弱性
+# 理由を必ず書くこと。四半期ごとに見直す。
+#
+# 形式: GHSA-ID  理由（1行）
+
+GHSA-vpq2-c234-7xj6  google-gax依存チェーン。直接利用なし。google-gax更新待ち
+GHSA-8mmm-9v2q-x3f9  pixi-live2d-display経由のgh-pages。prototype pollution だがサーバー側では使用しない
