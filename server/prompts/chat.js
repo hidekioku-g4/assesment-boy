@@ -126,7 +126,7 @@ const phaseInstructions = {
 
 // --- Step 2a: システムインストラクション ---
 export const getChatSystemInstruction = (userInfo = {}, options = {}) => {
-  const { userProfile = null, historyLength = 0 } = options;
+  const { userProfile = null, lastSession = null, historyLength = 0 } = options;
   const userName = userInfo.name || '';
   const phase = getConversationPhase(historyLength);
   const isFirstMessage = historyLength === 0;
@@ -295,7 +295,45 @@ export const getChatSystemInstruction = (userInfo = {}, options = {}) => {
     }
   }
 
-  // 会話フェーズ
+  // 前回セッションの参照（openingフェーズで自然に活用）
+  if (lastSession && phase === 'opening') {
+    const topicParts = [];
+    if (lastSession.keyTopics) {
+      try {
+        const topics = JSON.parse(lastSession.keyTopics);
+        if (Array.isArray(topics) && topics.length > 0) {
+          topicParts.push(`前回の話題: ${topics.join('、')}`);
+        }
+      } catch {
+        if (lastSession.keyTopics.trim()) topicParts.push(`前回の話題: ${lastSession.keyTopics}`);
+      }
+    }
+    if (lastSession.nextSuggestions) {
+      try {
+        const suggestions = JSON.parse(lastSession.nextSuggestions);
+        if (Array.isArray(suggestions) && suggestions.length > 0) {
+          topicParts.push(`次回への申し送り: ${suggestions.join('、')}`);
+        }
+      } catch {
+        if (lastSession.nextSuggestions.trim()) topicParts.push(`次回への申し送り: ${lastSession.nextSuggestions}`);
+      }
+    }
+    if (lastSession.sessionDate) {
+      topicParts.push(`前回の日付: ${lastSession.sessionDate}`);
+    }
+    if (topicParts.length > 0) {
+      lines.push(
+        '## 前回のセッション情報',
+        ...topicParts,
+        '※ 挨拶の後、自然に前回の話題に触れてください（「そういえば前回○○の話してましたよね」「前回の○○、その後どうですか？」）',
+        '※ 毎回必ず触れる必要はない。自然な流れで1つだけ拾えればOK',
+        '※ 「記録によると」「前回のデータでは」のような言い方は絶対にしない',
+        '',
+      );
+    }
+  }
+
+  // 会話���ェーズ
   lines.push(...phaseInstructions[phase], '');
 
   // 時間帯コンテキスト
@@ -377,12 +415,16 @@ export const buildGeminiContents = (history = []) => {
 };
 
 // --- Step 2c: 現在のユーザーメッセージを構築 ---
-export const buildCurrentUserMessage = (message, context = '', faceAnalysis = null) => {
+export const buildCurrentUserMessage = (message, context = '', faceAnalysis = null, emotionShift = '') => {
   const parts = [];
 
   const faceInfo = formatFaceAnalysis(faceAnalysis);
   if (faceInfo) {
     parts.push(`【相手の様子】${faceInfo}`);
+  }
+
+  if (emotionShift) {
+    parts.push(`【注意: ${emotionShift}。普段より慎重に、まず受け止めてから応答してください】`);
   }
 
   if (context && typeof context === 'string' && context.trim()) {

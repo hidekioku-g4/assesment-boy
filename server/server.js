@@ -18,8 +18,8 @@ import { getChatPrompt, getChatSystemInstruction, buildGeminiContents, buildCurr
 import { getSessionSummaryPrompt, getAgendaSuggestionPrompt } from './prompts/session-summary.js';
 import { getFaceFeedbackPrompt } from './prompts/face-feedback.js';
 import { getMetaSummaryPrompt } from './prompts/meta-summary.js';
-import { detectCrisis, getCrisisContext, checkOutputSafety, SAFE_FALLBACK_RESPONSE } from './safety.js';
-import { fetchParticipants, insertSupportRecord, insertSessionSummary, fetchSessionSummaries, fetchUserProfile, upsertUserProfile, countSessionSummaries, fetchSuggestedTopics } from './bigquery.js';
+import { detectCrisis, detectCrisisLLM, getCrisisContext, checkOutputSafety, SAFE_FALLBACK_RESPONSE, notifyCrisis } from './safety.js';
+import { fetchParticipants, insertSupportRecord, insertSessionSummary, fetchSessionSummaries, fetchUserProfile, upsertUserProfile, countSessionSummaries, fetchSuggestedTopics, insertSafetyLog } from './bigquery.js';
 import { synthesize as ttsSynthesize, getVoices as ttsGetVoices } from './tts/index.js';
 import { preprocessTtsText, warmupTokenizer } from './tts/preprocess.js';
 import { synthesizeStream as cartesiaStream, warmup as cartesiaWarmup, STREAM_SAMPLE_RATE as CARTESIA_STREAM_SR } from './tts/cartesia-stream.js';
@@ -170,7 +170,10 @@ const summarizeGeminiError = (error) => {
 
 // --- プロフィールキャッシュ（BQ呼び出しを毎メッセージ避ける） ---
 const profileCache = new Map(); // key: msAccountId → { profile, fetchedAt }
+const lastSessionCache = new Map(); // key: msAccountId → { session, fetchedAt }
+const midSessionSummaryCache = new Map(); // key: msAccountId → { summary, messageCount }
 const PROFILE_CACHE_TTL_MS = 10 * 60 * 1000; // 10分
+const MID_SESSION_SUMMARY_THRESHOLD = 20;
 
 const getCachedProfile = async (msAccountId) => {
   if (!msAccountId) return null;
@@ -184,6 +187,23 @@ const getCachedProfile = async (msAccountId) => {
     return profile;
   } catch (err) {
     console.warn('[profile-cache] fetch failed, continuing without profile:', err?.message);
+    return null;
+  }
+};
+
+const getCachedLastSession = async (msAccountId) => {
+  if (!msAccountId) return null;
+  const cached = lastSessionCache.get(msAccountId);
+  if (cached && Date.now() - cached.fetchedAt < PROFILE_CACHE_TTL_MS) {
+    return cached.session;
+  }
+  try {
+    const summaries = await fetchSessionSummaries({ msAccountId, limit: 1 });
+    const session = summaries?.[0] || null;
+    lastSessionCache.set(msAccountId, { session, fetchedAt: Date.now() });
+    return session;
+  } catch (err) {
+    console.warn('[last-session-cache] fetch failed:', err?.message);
     return null;
   }
 };
@@ -1047,7 +1067,7 @@ app.post('/api/chat', async (req, res) => {
     const systemInstruction = getChatSystemInstruction(userInfo, { userProfile, historyLength: history.length });
     const contents = [
       ...buildGeminiContents(history),
-      buildCurrentUserMessage(message, trimmedContext, faceAnalysis),
+      buildCurrentUserMessage(message, trimmedContext, faceAnalysis, ''),
     ];
 
     const geminiStart = Date.now();
@@ -1097,6 +1117,7 @@ app.post('/api/chat-stream', async (req, res) => {
   const context = typeof req.body?.context === 'string' ? req.body.context : '';
   const userInfo = typeof req.body?.userInfo === 'object' && req.body.userInfo ? req.body.userInfo : {};
   const faceAnalysis = typeof req.body?.faceAnalysis === 'object' && req.body.faceAnalysis ? req.body.faceAnalysis : null;
+  const emotionShift = typeof req.body?.emotionShift === 'string' ? req.body.emotionShift.trim() : '';
   const msAccountId = typeof req.body?.msAccountId === 'string' ? req.body.msAccountId : '';
   const ALLOWED_STREAM_MODELS = new Set([
     'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-2.5-flash-preview-05-20',
@@ -1126,14 +1147,75 @@ app.post('/api/chat-stream', async (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
 
   try {
-    // 危機検出（LLM前段）
-    const crisis = detectCrisis(message);
+    // 危機検出: 第1段（正規表現）+ 第2段（LLM）の二段階判定
+    let crisis = detectCrisis(message);
+    if (crisis.level === 'none' && genAI) {
+      const llmCrisis = await detectCrisisLLM(message, genAI);
+      if (llmCrisis.level !== 'none') {
+        crisis = { level: llmCrisis.level, matched: [`llm:${llmCrisis.level}`] };
+        console.log(`[chat-stream] LLM crisis detected: level=${llmCrisis.level}`);
+      }
+    }
     if (crisis.level !== 'none') {
       console.log(`[chat-stream] crisis detected: level=${crisis.level}, patterns=${crisis.matched.join(',')}`);
+      const notifyPayload = {
+        msAccountId,
+        userName: userInfo?.name || '',
+        crisisLevel: crisis.level,
+        matchedPatterns: crisis.matched,
+        userMessage: message,
+        eventType: 'crisis_detected',
+        actionTaken: 'prompt_injection',
+      };
+      notifyCrisis(notifyPayload).catch(() => {});
+      insertSafetyLog(notifyPayload).catch(() => {});
     }
 
-    const userProfile = await getCachedProfile(msAccountId);
-    let systemInstruction = getChatSystemInstruction(userInfo, { userProfile, historyLength: history.length });
+    const [userProfile, lastSession] = await Promise.all([
+      getCachedProfile(msAccountId),
+      getCachedLastSession(msAccountId),
+    ]);
+
+    // ミッドセッション要約: 長い会話の古い履歴を要約で圧縮
+    let compressedHistory = history;
+    if (history.length > MID_SESSION_SUMMARY_THRESHOLD && genAI) {
+      const cacheKey = msAccountId || 'anonymous';
+      const cached = midSessionSummaryCache.get(cacheKey);
+      const recentCount = 12;
+      const oldMessages = history.slice(0, -recentCount);
+      const recentMessages = history.slice(-recentCount);
+
+      let summary = null;
+      if (cached && cached.messageCount >= oldMessages.length) {
+        summary = cached.summary;
+      } else {
+        try {
+          const oldText = oldMessages.map(m => `${m.role === 'assistant' ? 'AI' : 'ユーザー'}: ${m.text}`).join('\n');
+          const summaryResult = await genAI.models.generateContent({
+            model: 'gemini-2.0-flash',
+            config: { maxOutputTokens: 300, temperature: 0, thinkingConfig: { thinkingBudget: 0 } },
+            contents: [{ role: 'user', parts: [{ text: `以下の会話の要約を3〜5文で簡潔に書いてください。話題・感情・重要な発言を含めてください。\n\n${oldText}` }] }],
+          });
+          summary = summaryResult?.text?.trim() || null;
+          if (summary) {
+            midSessionSummaryCache.set(cacheKey, { summary, messageCount: oldMessages.length });
+            console.log(`[chat-stream] mid-session summary generated (${oldMessages.length} msgs → ${summary.length} chars)`);
+          }
+        } catch (err) {
+          console.warn('[chat-stream] mid-session summary failed, using full history', err?.message);
+        }
+      }
+
+      if (summary) {
+        compressedHistory = [
+          { role: 'user', text: `（これまでの会話の要約: ${summary}）` },
+          { role: 'assistant', text: '（承知しました。要約を踏まえて会話を続けます）' },
+          ...recentMessages,
+        ];
+      }
+    }
+
+    let systemInstruction = getChatSystemInstruction(userInfo, { userProfile, lastSession, historyLength: history.length });
 
     // 危機レベルに応じてプロンプトに追加コンテキストを注入
     const crisisContext = getCrisisContext(crisis.level);
@@ -1142,8 +1224,8 @@ app.post('/api/chat-stream', async (req, res) => {
     }
 
     const contents = [
-      ...buildGeminiContents(history),
-      buildCurrentUserMessage(message, trimmedContext, faceAnalysis),
+      ...buildGeminiContents(compressedHistory),
+      buildCurrentUserMessage(message, trimmedContext, faceAnalysis, emotionShift),
     ];
     const geminiStart = Date.now();
 
@@ -1181,6 +1263,17 @@ app.post('/api/chat-stream', async (req, res) => {
       console.warn(`[chat-stream] UNSAFE output blocked: ${safetyCheck.reason}`);
       res.write(`data: ${JSON.stringify({ type: 'replace', text: SAFE_FALLBACK_RESPONSE })}\n\n`);
       res.write(`data: ${JSON.stringify({ type: 'done', fullText: SAFE_FALLBACK_RESPONSE })}\n\n`);
+      const blockPayload = {
+        msAccountId,
+        userName: userInfo?.name || '',
+        crisisLevel: 'output_blocked',
+        matchedPatterns: [safetyCheck.reason],
+        userMessage: message,
+        eventType: 'output_blocked',
+        actionTaken: 'response_replaced',
+      };
+      notifyCrisis(blockPayload).catch(() => {});
+      insertSafetyLog(blockPayload).catch(() => {});
     } else {
       res.write(`data: ${JSON.stringify({ type: 'done', fullText: fullText.trim() })}\n\n`);
     }
@@ -1282,10 +1375,16 @@ app.post('/api/tts-stream', async (req, res) => {
     return res.status(500).json({ error: 'CARTESIA_API_KEY not configured' });
   }
 
+  const emotion = typeof req.body?.emotion === 'string' ? req.body.emotion.trim() : '';
+  const emotionSpeedMap = { sad: 0.9, happy: 1.08, surprise: 1.05, think: 0.92, shy: 0.93 };
+  const emotionPitchMap = { sad: -1.5, happy: 1.5, surprise: 2.0, think: -0.5, shy: 0.5 };
+  const emotionSpeed = emotionSpeedMap[emotion] || 1.0;
+  const emotionPitch = emotionPitchMap[emotion] || 0;
+
   const requestedRate = Number(req.body?.speakingRate);
-  const speed = Number.isFinite(requestedRate) && requestedRate > 0
-    ? Math.max(0.5, Math.min(2.0, requestedRate))
-    : undefined;
+  const baseSpeed = Number.isFinite(requestedRate) && requestedRate > 0 ? requestedRate : 1.0;
+  const speed = Math.max(0.5, Math.min(2.0, baseSpeed * emotionSpeed));
+  const pitch = emotionPitch;
   const voice = typeof req.body?.voice === 'string' ? req.body.voice.trim() : undefined;
 
   res.setHeader('Content-Type', 'text/event-stream');
@@ -1300,6 +1399,7 @@ app.post('/api/tts-stream', async (req, res) => {
     await impl.stream(text, {
       speed,
       voice,
+      pitch,
       onChunk: (base64Data) => {
         if (!res.destroyed) {
           res.write(`data: ${JSON.stringify({ type: 'audio', data: base64Data })}\n\n`);

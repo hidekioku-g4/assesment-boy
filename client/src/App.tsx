@@ -860,7 +860,7 @@ const createChatId = () => {
 
 const CHAT_STORAGE_KEY_PREFIX = 'meeting-tool:chat:';
 const CHAT_STORAGE_MAX_MESSAGES = 80;
-const CHAT_CONTEXT_MAX_MESSAGES = 12;
+const CHAT_CONTEXT_MAX_MESSAGES = 30;
 const CHAT_CONTEXT_MESSAGE_MAX_CHARS = 800;
 
 const getChatDateKey = () => {
@@ -1127,6 +1127,8 @@ function ChatPanel({
   const ttsActiveChainsRef = useRef(0);
   // リップシンク用の AnalyserNode（TTS AudioContext と同一に接続）
   const ttsAnalyserRef = useRef<AnalyserNode | null>(null);
+  // 感情適応TTS: 現在の表情をTTSリクエストに渡す
+  const ttsEmotionRef = useRef<string>('neutral');
   // バージイン時のフェードアウト用: 現在再生中の {source, gain} を追跡
   const ttsActiveSourcesRef = useRef<Array<{ source: AudioBufferSourceNode; gain: GainNode; endTime: number }>>([]);
   // 相槌: ユーザー発話中のポーズ検出
@@ -1308,7 +1310,7 @@ function ChatPanel({
         const response = await fetchWithAuth('/api/tts-stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, speakingRate: ttsSpeedRef.current, voice: ttsVoiceRef.current, provider: ttsProviderRef.current }),
+          body: JSON.stringify({ text, speakingRate: ttsSpeedRef.current, voice: ttsVoiceRef.current, provider: ttsProviderRef.current, emotion: ttsEmotionRef.current }),
           signal: abort.signal,
         });
 
@@ -1479,8 +1481,33 @@ function ChatPanel({
   }, []);
 
   // 顔分析リアルタイム更新（常に更新、表示は設定パネルで制御）
+  // 感情軌跡: 直近の表情を記録し、急激なネガティブシフトを検出
+  const emotionTrajectoryRef = useRef<{ expression: string; ts: number }[]>([]);
+  const emotionShiftRef = useRef<string | null>(null);
+
   const handleFaceRealtimeUpdate = useCallback((data: RealtimeAnalysis) => {
     setFaceAnalysisRealtime(data);
+
+    const now = Date.now();
+    const trajectory = emotionTrajectoryRef.current;
+    trajectory.push({ expression: data.expression, ts: now });
+    // 直近60秒分だけ保持
+    while (trajectory.length > 0 && now - trajectory[0].ts > 60_000) trajectory.shift();
+
+    // ネガティブシフト検出: 直近10秒以内にポジティブ/中立→ネガティブへ急変
+    const negativeExpressions = new Set(['worried', 'tense']);
+    const positiveExpressions = new Set(['smile', 'happy', 'neutral']);
+    const recent = trajectory.filter(e => now - e.ts <= 10_000);
+    if (recent.length >= 3) {
+      const hasPositiveBefore = recent.slice(0, -2).some(e => positiveExpressions.has(e.expression));
+      const lastTwo = recent.slice(-2);
+      const isNegativeNow = lastTwo.every(e => negativeExpressions.has(e.expression));
+      if (hasPositiveBefore && isNegativeNow) {
+        emotionShiftRef.current = `表情が急に${data.expression === 'worried' ? '心配そう' : 'こわばった'}に変化した`;
+      } else if (!negativeExpressions.has(data.expression)) {
+        emotionShiftRef.current = null;
+      }
+    }
   }, []);
 
   // キャラの目の位置から視線オフセットを計算
@@ -1884,6 +1911,7 @@ function ChatPanel({
               context,
               userInfo,
               faceAnalysis: faceAnalysisRealtime,
+              emotionShift: emotionShiftRef.current,
               msAccountId,
               geminiModel,
             }),
@@ -1980,6 +2008,7 @@ function ChatPanel({
                       if (afterMode.includes(']')) {
                         const expResult = parseExpression(afterMode);
                         setAvatarExpression(expResult.expression);
+                        ttsEmotionRef.current = expResult.expression;
                         afterMode = expResult.cleanText;
                         tagsParsed = true;
                         rawTtsText = afterMode;

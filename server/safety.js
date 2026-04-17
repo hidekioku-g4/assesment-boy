@@ -1,4 +1,7 @@
-// server/safety.js - 安全フィルター（危機検出 + 出力チェック）
+// server/safety.js - 安全フィルター（危機検出 + 出力チェック + 通知）
+
+const CRISIS_WEBHOOK_URL = process.env.CRISIS_WEBHOOK_URL || '';
+const CRISIS_NOTIFY_EMAIL = process.env.CRISIS_NOTIFY_EMAIL || '';
 
 // 危機キーワードパターン（入力チェック用）
 const CRISIS_PATTERNS = [
@@ -99,3 +102,90 @@ export function checkOutputSafety(text) {
 }
 
 export const SAFE_FALLBACK_RESPONSE = '[mode:respond][表情:sad] 辛い気持ちを話してくれてありがとうございます。一人で抱え込まないでほしいです。もし今すごく辛かったら、いのちの電話（0570-783-556）や、身近な信頼できる人に話してみてください。私もここで聞いていますからね。';
+
+const LLM_CRISIS_PROMPT = `あなたは就労支援施設のメンタルヘルス安全システムです。
+ユーザーの発言を分析し、危機レベルを判定してください。
+
+判定基準:
+- direct: 自殺念慮、自傷意図、「死にたい」「消えたい」等の直接表現、または間接的でも文脈から深刻な危機が読み取れる場合
+- indirect: 強い疲弊感、孤立感、絶望感、無力感を示唆する発言。「しんどい」「頑張れない」「もう終わり」「逃げたい」等
+- none: 上記に該当しない通常の発言
+
+以下の形式で回答（1行のみ）:
+LEVEL:direct または LEVEL:indirect または LEVEL:none
+
+注意:
+- 日本語の間接的・婉曲的な表現に注意してください
+- 「大丈夫」と言いつつ辛さが透ける場合はindirect
+- 迷ったらindirect寄りに判定（見逃すより誤検出が安全）`;
+
+/**
+ * LLMベースの危機判定（正規表現で検出できない間接表現を捕捉）
+ * @param {string} message
+ * @param {object} genAI - GoogleGenAI instance
+ * @param {string} model - model name
+ * @returns {Promise<{level: 'none'|'indirect'|'direct', source: 'llm'}>}
+ */
+export async function detectCrisisLLM(message, genAI, model = 'gemini-2.0-flash') {
+  if (!message || !genAI) return { level: 'none', source: 'llm' };
+
+  try {
+    const result = await genAI.models.generateContent({
+      model,
+      config: {
+        systemInstruction: LLM_CRISIS_PROMPT,
+        maxOutputTokens: 20,
+        temperature: 0,
+      },
+      contents: [{ role: 'user', parts: [{ text: message }] }],
+    });
+    const output = (result?.text ?? '').trim();
+    const match = output.match(/LEVEL:(direct|indirect|none)/i);
+    const level = match ? match[1].toLowerCase() : 'none';
+    return { level, source: 'llm' };
+  } catch (error) {
+    console.error('[safety] LLM crisis detection failed (fallback to none)', error?.message);
+    return { level: 'none', source: 'llm_error' };
+  }
+}
+
+/**
+ * 危機検出時にWebhookで即時通知（Google Chat / Slack / Teams 等）
+ * 非同期・非ブロッキング。失敗してもユーザーへの応答に影響しない。
+ */
+export async function notifyCrisis({ userName, crisisLevel, matchedPatterns, userMessage, eventType }) {
+  if (!CRISIS_WEBHOOK_URL) return;
+
+  const timestamp = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+  const excerpt = userMessage ? userMessage.slice(0, 100) : '';
+  const levelEmoji = crisisLevel === 'direct' ? '🚨' : '⚠️';
+
+  const text = [
+    `${levelEmoji} **危機検出アラート** (${eventType || 'crisis_detected'})`,
+    `時刻: ${timestamp}`,
+    `利用者: ${userName || '不明'}`,
+    `レベル: ${crisisLevel}`,
+    `パターン: ${(matchedPatterns || []).join(', ')}`,
+    excerpt ? `発言（抜粋）: ${excerpt}...` : '',
+    '',
+    '※ スタッフによる確認・フォローアップをお願いします',
+  ].filter(Boolean).join('\n');
+
+  try {
+    const body = CRISIS_WEBHOOK_URL.includes('chat.googleapis.com')
+      ? JSON.stringify({ text })
+      : CRISIS_WEBHOOK_URL.includes('hooks.slack.com')
+        ? JSON.stringify({ text })
+        : JSON.stringify({ text, title: `${levelEmoji} 危機検出: ${userName || '不明'}` });
+
+    await fetch(CRISIS_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      signal: AbortSignal.timeout(5000),
+    });
+    console.log(`[safety] crisis notification sent for ${userName}`);
+  } catch (error) {
+    console.error('[safety] crisis notification failed (non-blocking)', error?.message || error);
+  }
+}

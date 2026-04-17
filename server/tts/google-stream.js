@@ -43,7 +43,7 @@ function mapSpeed(clientSpeed) {
  * @param {string} rawText
  * @param {{ speed?: number, voice?: string, onChunk: (base64: string) => void, onDone: () => void, onError: (err: Error) => void }} options
  */
-export async function synthesizeStream(rawText, { speed, voice, onChunk, onDone, onError }) {
+export async function synthesizeStream(rawText, { speed, voice, pitch, onChunk, onDone, onError }) {
   // Chirp 3 HD は漢字・文脈を正しく読むので kuromoji 前処理は最小限（ふりがなアノテーションだけ処理）
   const text = preprocessTtsText(rawText.trim(), { skipKuromoji: true, keepKanji: true });
   if (!text) {
@@ -82,6 +82,8 @@ export async function synthesizeStream(rawText, { speed, voice, onChunk, onDone,
       onDone();
     });
 
+    const pitchValue = Number.isFinite(pitch) ? Math.max(-20, Math.min(20, pitch)) : 0;
+
     // 1. config フレーム
     stream.write({
       streamingConfig: {
@@ -90,6 +92,7 @@ export async function synthesizeStream(rawText, { speed, voice, onChunk, onDone,
           audioEncoding: 'PCM',
           sampleRateHertz: SAMPLE_RATE,
           speakingRate,
+          ...(pitchValue !== 0 && { pitch: pitchValue }),
         },
       },
     });

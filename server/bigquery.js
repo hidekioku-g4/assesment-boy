@@ -721,3 +721,52 @@ export const fetchSuggestedTopics = async ({ msAccountId, meetingType, limit = 5
     return [];
   }
 };
+
+const getSafetyLogConfig = () => {
+  const projectId = process.env.BQ_SUMMARY_PROJECT_ID || process.env.BQ_EXPORT_PROJECT_ID || process.env.BQ_PROJECT_ID || '';
+  const dataset = process.env.BQ_SUMMARY_DATASET || process.env.BQ_EXPORT_DATASET || '';
+  const table = process.env.BQ_SAFETY_LOG_TABLE || 'safety_audit_logs';
+  return { projectId, dataset, table };
+};
+
+export const insertSafetyLog = async (payload) => {
+  const config = getSafetyLogConfig();
+  const dataset = sanitizeIdentifier(config.dataset);
+  const table = sanitizeIdentifier(config.table);
+  const projectId = sanitizeProjectId(config.projectId);
+  if (!dataset || !table) {
+    console.warn('[insertSafetyLog] missing config, skipping');
+    return { ok: false, reason: 'missing_config' };
+  }
+
+  try {
+    await ensureSubjectToken();
+  } catch {
+    console.warn('[insertSafetyLog] no subject token, skipping');
+    return { ok: false, reason: 'no_token' };
+  }
+
+  const bigquery = getBigQueryClient(projectId || undefined);
+  const logId = `safety_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const row = {
+    log_id: logId,
+    ms_account_id: payload.msAccountId || null,
+    user_name: payload.userName || null,
+    event_type: payload.eventType || null,
+    crisis_level: payload.crisisLevel || null,
+    matched_patterns: payload.matchedPatterns ? JSON.stringify(payload.matchedPatterns) : null,
+    user_message_excerpt: payload.userMessage ? payload.userMessage.slice(0, 200) : null,
+    action_taken: payload.actionTaken || null,
+    created_at: new Date().toISOString(),
+  };
+
+  try {
+    const tableRef = bigquery.dataset(dataset).table(table);
+    await insertWithRetry(tableRef, row, logId);
+    console.log(`[insertSafetyLog] logged: ${payload.eventType} level=${payload.crisisLevel}`);
+    return { ok: true };
+  } catch (error) {
+    console.error('[insertSafetyLog] insert failed (non-blocking)', error?.message || error);
+    return { ok: false, reason: 'insert_failed' };
+  }
+};
