@@ -10,5 +10,9 @@
 !server/**
 !public/
 !public/**
+!client/
+!client/**
+!postcss.config.cjs
+!tailwind.config.cjs
 !config/
 !config/support-record.json

@@ -42,7 +42,7 @@ async function generateWithGoogleTTS(text) {
 }
 
 async function main() {
-  const outDir = resolve('public/assets/aizuchi');
+  const outDir = resolve('public/aizuchi');
   mkdirSync(outDir, { recursive: true });
 
   console.log(`Generating ${AIZUCHI_PHRASES.length} aizuchi audio files...`);

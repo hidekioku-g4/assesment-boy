@@ -4,7 +4,6 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY client/ client/
-COPY public/ public/
 COPY postcss.config.cjs tailwind.config.cjs ./
 RUN npm run client:build
 
@@ -15,13 +14,14 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-# サーバーコード
 COPY server/ server/
 
-# フロントエンドビルド済みファイル（Dockerビルド内で生成）
+# Static public files (live2d, aizuchi, voice-processor.js)
+COPY public/ public/
+
+# Overlay vite build output (index.html + hashed JS/CSS)
 COPY --from=builder /app/public/ public/
 
-# 設定ファイルの初期値（BQ フォールバック用）
 COPY config/support-record.json config/
 
 ENV PORT=8080 \

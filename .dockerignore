@@ -7,7 +7,7 @@ client/.env
 electron
 data
 docs
-assets
+/assets
 _backup*
 *.exe
 *.md

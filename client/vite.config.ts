@@ -11,7 +11,7 @@ export default defineConfig({
   base: './',
   build: {
     outDir: path.resolve(__dirname, '../public'),
-    emptyOutDir: true,
+    emptyOutDir: false,
     sourcemap: true,
   },
   resolve: {

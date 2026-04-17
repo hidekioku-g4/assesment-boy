@@ -18,14 +18,14 @@ let lastPlayedId = '';
 export async function preloadAizuchi(audioCtx: AudioContext): Promise<void> {
   if (loaded) return;
   try {
-    const res = await fetch('/assets/aizuchi/manifest.json');
+    const res = await fetch('/aizuchi/manifest.json');
     if (!res.ok) return;
     const manifest: AizuchiEntry[] = await res.json();
 
     const decoded = await Promise.all(
       manifest.map(async (entry) => {
         try {
-          const audioRes = await fetch(`/assets/aizuchi/${entry.file}`);
+          const audioRes = await fetch(`/aizuchi/${entry.file}`);
           const arrayBuf = await audioRes.arrayBuffer();
           const buffer = await audioCtx.decodeAudioData(arrayBuf);
           return { ...entry, buffer };
