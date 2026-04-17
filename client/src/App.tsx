@@ -16,6 +16,7 @@ import {
   msalInstance,
 } from '@/lib/msal';
 import { fetchWithAuth, getWsTokenParam } from '@/lib/fetchWithAuth';
+import { preloadAizuchi, pickInstantAizuchi, playAizuchiBuffer, findAizuchiBuffer, isAizuchiReady } from '@/lib/aizuchi';
 import { SupportRecordPanel, type SupportRecordSection } from '@/features/support-record/support-record-panel';
 import { InterviewPracticePanel } from '@/features/interview-practice/interview-practice-panel';
 import {
@@ -1128,6 +1129,10 @@ function ChatPanel({
   const ttsAnalyserRef = useRef<AnalyserNode | null>(null);
   // バージイン時のフェードアウト用: 現在再生中の {source, gain} を追跡
   const ttsActiveSourcesRef = useRef<Array<{ source: AudioBufferSourceNode; gain: GainNode; endTime: number }>>([]);
+  // 相槌: ユーザー発話中のポーズ検出
+  const aizuchiSilenceFramesRef = useRef(0);
+  const aizuchiSpeechFramesRef = useRef(0);
+  const aizuchiPreloadedRef = useRef(false);
 
   // 全ての音声を停止するヘルパー関数
   // options.fadeMs を指定すると自然にフェードアウト（バージイン時の唐突さ回避）
@@ -1284,6 +1289,11 @@ function ChatPanel({
         }
         if (audioCtx.state === 'suspended') {
           await audioCtx.resume();
+        }
+        // 相槌音声プリロード（初回のみ）
+        if (!aizuchiPreloadedRef.current) {
+          aizuchiPreloadedRef.current = true;
+          preloadAizuchi(audioCtx).catch(() => {});
         }
         // リップシンク用 AnalyserNode（シングルトン）
         if (!ttsAnalyserRef.current) {
@@ -1998,9 +2008,27 @@ function ChatPanel({
                       );
                     }
 
-                    // TTS 早期トリガー
+                    // TTS 早期トリガー（aizuchiモードはキャッシュ音声を優先）
                     if (!hasStartedTts && isSpeakable(pendingTtsText, replyMode, true)) {
                       hasStartedTts = true;
+                      if (replyMode === 'aizuchi') {
+                        const cachedBuf = findAizuchiBuffer(pendingTtsText.trim());
+                        if (cachedBuf && ttsAudioCtxRef.current) {
+                          const ctx = ttsAudioCtxRef.current;
+                          if (ctx.state === 'suspended') await ctx.resume();
+                          const tracking = playAizuchiBuffer(ctx, cachedBuf, ttsAnalyserRef.current, 'gemini-aizuchi');
+                          ttsActiveSourcesRef.current.push(tracking);
+                          tracking.source.onended = () => {
+                            ttsActiveSourcesRef.current = ttsActiveSourcesRef.current.filter((s) => s.source !== tracking.source);
+                            ttsSpeakingRef.current = false;
+                            setTtsSpeaking(false);
+                          };
+                          ttsSpeakingRef.current = true;
+                          setTtsSpeaking(true);
+                          pendingTtsText = '';
+                          continue;
+                        }
+                      }
                       speakReply(pendingTtsText.trim());
                       pendingTtsText = '';
                     } else if (hasStartedTts && isSpeakable(pendingTtsText, replyMode, false)) {
@@ -2276,6 +2304,8 @@ function ChatPanel({
 
       // 送信時にカウンターをリセット
       autoSendRetryRef.current = 0;
+      aizuchiSpeechFramesRef.current = 0;
+      aizuchiSilenceFramesRef.current = 0;
       flushVoiceTranscript();
     }, silenceMs);
   }, [flushVoiceTranscript]);
@@ -2429,6 +2459,28 @@ function ChatPanel({
         } else {
           bargeInFrameCountRef.current = 0;
           bargeInPendingFramesRef.current = [];
+
+          // 相槌: ユーザー発話中のポーズを検出して自動再生
+          if (rms > AUTO_SEND_RMS_THRESHOLD) {
+            aizuchiSpeechFramesRef.current += 1;
+            aizuchiSilenceFramesRef.current = 0;
+          } else if (aizuchiSpeechFramesRef.current > 50) {
+            // ~2秒以上話した後のポーズ検出（14フレーム ≈ 600ms）
+            aizuchiSilenceFramesRef.current += 1;
+            if (aizuchiSilenceFramesRef.current === 14 && isAizuchiReady()) {
+              const audioCtx = ttsAudioCtxRef.current;
+              if (audioCtx && audioCtx.state === 'running') {
+                const pick = pickInstantAizuchi();
+                if (pick) {
+                  const tracking = playAizuchiBuffer(audioCtx, pick.buffer, ttsAnalyserRef.current, pick.id);
+                  ttsActiveSourcesRef.current.push(tracking);
+                  tracking.source.onended = () => {
+                    ttsActiveSourcesRef.current = ttsActiveSourcesRef.current.filter((s) => s.source !== tracking.source);
+                  };
+                }
+              }
+            }
+          }
         }
 
         if (rms > AUTO_SEND_RMS_THRESHOLD) {
