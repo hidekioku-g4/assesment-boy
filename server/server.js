@@ -20,6 +20,7 @@ import { getFaceFeedbackPrompt } from './prompts/face-feedback.js';
 import { getMetaSummaryPrompt } from './prompts/meta-summary.js';
 import { detectCrisis, detectCrisisLLM, getCrisisContext, checkOutputSafety, SAFE_FALLBACK_RESPONSE, notifyCrisis } from './safety.js';
 import { fetchParticipants, insertSupportRecord, insertSessionSummary, fetchSessionSummaries, fetchUserProfile, upsertUserProfile, countSessionSummaries, fetchSuggestedTopics, insertSafetyLog } from './bigquery.js';
+import { fetchWeather, formatWeatherContext, getSeasonalContext } from './context-enrichment.js';
 import { synthesize as ttsSynthesize, getVoices as ttsGetVoices } from './tts/index.js';
 import { preprocessTtsText, warmupTokenizer } from './tts/preprocess.js';
 import { synthesizeStream as cartesiaStream, warmup as cartesiaWarmup, STREAM_SAMPLE_RATE as CARTESIA_STREAM_SR } from './tts/cartesia-stream.js';
@@ -1118,6 +1119,7 @@ app.post('/api/chat-stream', async (req, res) => {
   const userInfo = typeof req.body?.userInfo === 'object' && req.body.userInfo ? req.body.userInfo : {};
   const faceAnalysis = typeof req.body?.faceAnalysis === 'object' && req.body.faceAnalysis ? req.body.faceAnalysis : null;
   const emotionShift = typeof req.body?.emotionShift === 'string' ? req.body.emotionShift.trim() : '';
+  const streakDays = Number(req.body?.streakDays) || 0;
   const msAccountId = typeof req.body?.msAccountId === 'string' ? req.body.msAccountId : '';
   const ALLOWED_STREAM_MODELS = new Set([
     'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-2.5-flash-preview-05-20',
@@ -1171,10 +1173,13 @@ app.post('/api/chat-stream', async (req, res) => {
       insertSafetyLog(notifyPayload).catch(() => {});
     }
 
-    const [userProfile, lastSession] = await Promise.all([
+    const [userProfile, lastSession, weather] = await Promise.all([
       getCachedProfile(msAccountId),
       getCachedLastSession(msAccountId),
+      fetchWeather(),
     ]);
+    const weatherContext = formatWeatherContext(weather);
+    const seasonalContext = getSeasonalContext();
 
     // ミッドセッション要約: 長い会話の古い履歴を要約で圧縮
     let compressedHistory = history;
@@ -1215,7 +1220,7 @@ app.post('/api/chat-stream', async (req, res) => {
       }
     }
 
-    let systemInstruction = getChatSystemInstruction(userInfo, { userProfile, lastSession, historyLength: history.length });
+    let systemInstruction = getChatSystemInstruction(userInfo, { userProfile, lastSession, historyLength: history.length, weatherContext, seasonalContext, streakDays });
 
     // 危機レベルに応じてプロンプトに追加コンテキストを注入
     const crisisContext = getCrisisContext(crisis.level);
@@ -2037,6 +2042,61 @@ app.get('/api/session-summaries', async (req, res) => {
       return res.status(401).json({ error: 'invalid_subject_token' });
     }
     res.status(500).json({ error: 'fetch_summaries_failed', detail: message });
+  }
+});
+
+// セッション終了時のポジティブインサイト生成
+app.post('/api/session-insight', async (req, res) => {
+  if (!genAI) {
+    return res.status(500).json({ error: 'Gemini API key not configured' });
+  }
+
+  const { chatText, userName } = req.body || {};
+  if (!chatText) {
+    return res.status(400).json({ error: 'chat_text_required' });
+  }
+
+  console.log('[session-insight] generating...');
+
+  try {
+    const result = await generateGeminiContent({
+      model: 'gemini-2.0-flash',
+      contents: [{
+        role: 'user',
+        parts: [{ text: `あなたは会話分析のプロです。以下の会話ログから、ユーザー（${userName || '利用者'}さん）の良かった点・成長・ポジティブな変化を見つけて、本人が嬉しくなるような短い振り返りカードを作ってください。
+
+ルール:
+- JSON形式で返す: {"emoji": "絵文字1つ", "title": "10文字以内のタイトル", "body": "50文字以内の本文", "encouragement": "20文字以内の応援メッセージ"}
+- ネガティブなことは書かない。どんな会話でもポジティブな側面を見つける
+- 「話してくれたこと自体」が素晴らしいと伝える
+- 具体的な会話内容に触れると嬉しさが増す
+
+会話ログ:
+${chatText.slice(0, 3000)}` }],
+      }],
+      config: {
+        temperature: 0.7,
+        maxOutputTokens: 200,
+        responseMimeType: 'application/json',
+      },
+    }, 'session-insight');
+
+    const text = result?.candidates?.[0]?.content?.parts?.[0]?.text
+      || result?.text?.() || '{}';
+    let insight;
+    try {
+      insight = JSON.parse(text);
+    } catch {
+      insight = { emoji: '✨', title: 'お話ありがとう', body: '今日も会話してくれてありがとうございます！', encouragement: 'また明日も話そうね' };
+    }
+
+    console.log('[session-insight] done:', insight.title);
+    res.json({ insight });
+  } catch (err) {
+    console.warn('[session-insight] failed:', err?.message);
+    res.json({
+      insight: { emoji: '🌟', title: 'お疲れさま', body: '今日もお話してくれてありがとう！', encouragement: 'また会えるのを楽しみにしてるよ' },
+    });
   }
 });
 

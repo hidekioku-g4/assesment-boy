@@ -956,6 +956,25 @@ function ChatPanel({
   chatMessagesRef.current = messages;
   const [chatStarted, setChatStarted] = useState(false);
   const [chatEnding, setChatEnding] = useState(false);
+
+  // 連続出席ストリーク
+  const [streakDays, setStreakDays] = useState(0);
+  const updateStreak = useCallback(() => {
+    try {
+      const key = 'assess-kun:streak';
+      const stored = JSON.parse(localStorage.getItem(key) || '{}');
+      const today = new Date().toISOString().slice(0, 10);
+      const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+      if (stored.lastDate === today) {
+        setStreakDays(stored.count || 1);
+        return stored.count || 1;
+      }
+      const newCount = stored.lastDate === yesterday ? (stored.count || 0) + 1 : 1;
+      localStorage.setItem(key, JSON.stringify({ lastDate: today, count: newCount }));
+      setStreakDays(newCount);
+      return newCount;
+    } catch { return 0; }
+  }, []);
   // セッション保存用
   const sessionIdRef = useRef<string | null>(null);
   const lastSavedMessageCountRef = useRef(0);
@@ -982,6 +1001,7 @@ function ChatPanel({
   const [faceAnalysisEnabled, setFaceAnalysisEnabled] = useState(true);
   const [faceAnalysisSummary, setFaceAnalysisSummary] = useState<AnalysisSummary | null>(null);
   const [showSessionFeedback, setShowSessionFeedback] = useState(false);
+  const [sessionInsight, setSessionInsight] = useState<{ emoji: string; title: string; body: string; encouragement: string } | null>(null);
   const [faceAnalysisError, setFaceAnalysisError] = useState<string | null>(null);
   const [faceAnalysisDebugMode, setFaceAnalysisDebugMode] = useState(false);
   const [faceAnalysisRealtime, setFaceAnalysisRealtime] = useState<{
@@ -1470,10 +1490,11 @@ function ChatPanel({
     setMessages([agendaMessage]);
 
     setChatStarted(true);
+    updateStreak();
 
     // AIメッセージを読み上げ（読み仮名付きのまま渡す）
     speakReply(messageText);
-  }, [initialMessage, speakReply, stripFurigana]);
+  }, [initialMessage, speakReply, stripFurigana, updateStreak]);
 
   // 顔分析サマリーを受け取る
   const handleFaceAnalysisSummary = useCallback((summary: AnalysisSummary) => {
@@ -1587,21 +1608,27 @@ function ChatPanel({
     autoSavedAtRef.current = 0;
   }, []);
 
+  const handleCloseInsight = useCallback(() => {
+    setSessionInsight(null);
+    setChatStarted(false);
+    setMessages([]);
+  }, []);
+
   // 会話終了ボタンのハンドラー
   const handleEndChat = useCallback(async () => {
     if (chatEnding || !msAccountId) return;
     setChatEnding(true);
 
+    const chatText = messages
+      .map((m) => `${m.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${m.text}`)
+      .join('\n');
+
     // 自動保存済みで新しいメッセージがなければAPI呼び出しをスキップ
     const alreadySaved = autoSavedAtRef.current >= messages.length && messages.length > 0;
 
-    if (!alreadySaved) {
-      const chatText = messages
-        .map((m) => `${m.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${m.text}`)
-        .join('\n');
-
-      try {
-        await fetchWithAuth('/api/session-summary', {
+    const savePromise = alreadySaved
+      ? Promise.resolve()
+      : fetchWithAuth('/api/session-summary', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1616,18 +1643,27 @@ function ChatPanel({
             talentName: userInfo.name || null,
             sessionDate: new Date().toISOString().slice(0, 10),
           }),
-        });
-        console.log('[chat] session summary saved');
-      } catch (err) {
-        console.warn('[chat] failed to save session summary', err);
-      }
-    } else {
-      console.log('[chat] session already auto-saved, skipping summary API call');
-    }
+        }).then(() => console.log('[chat] session summary saved'))
+          .catch((err: unknown) => console.warn('[chat] failed to save session summary', err));
+
+    // インサイトカード生成（セッション保存と並行）
+    const insightPromise = messages.length >= 4
+      ? fetchWithAuth('/api/session-insight', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chatText, userName: userInfo.name || '' }),
+        }).then((r) => r.json())
+          .then((data: { insight?: { emoji: string; title: string; body: string; encouragement: string } }) => data.insight || null)
+          .catch(() => null)
+      : Promise.resolve(null);
+
+    const [, insight] = await Promise.all([savePromise, insightPromise]);
 
     // 顔分析が有効でサマリーがある場合はフィードバックモーダルを表示
     if (faceAnalysisEnabled && faceAnalysisSummary && faceAnalysisSummary.totalFrames > 0) {
       setShowSessionFeedback(true);
+    } else if (insight) {
+      setSessionInsight(insight);
     } else {
       setChatStarted(false);
       setMessages([]);
@@ -1891,6 +1927,7 @@ function ChatPanel({
       const assistantMessageId = createChatId();
       setMessages((prev) => (shouldReset ? [userMessage] : [...prev, userMessage]));
       setStatus('running');
+      setAvatarExpression('think');
       setError(null);
 
       // バージイン対応: このリクエストのシーケンス番号を払い出し、AbortController を紐付ける
@@ -1912,6 +1949,7 @@ function ChatPanel({
               userInfo,
               faceAnalysis: faceAnalysisRealtime,
               emotionShift: emotionShiftRef.current,
+              streakDays,
               msAccountId,
               geminiModel,
             }),
@@ -2666,6 +2704,11 @@ function ChatPanel({
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold text-slate-900">会話</h2>
           {chatStarted && <span className="text-[10px] text-slate-400">当日分のみ</span>}
+          {chatStarted && streakDays >= 2 && (
+            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 text-[10px] font-medium">
+              <span className="text-xs">{'🔥'}</span>{streakDays}日連続
+            </span>
+          )}
         </div>
       </header>
 
@@ -3104,6 +3147,28 @@ function ChatPanel({
         onClose={handleCloseSessionFeedback}
         onRequestAIFeedback={requestFaceAIFeedback}
       />
+
+      {/* セッション終了インサイトカード */}
+      {sessionInsight && (
+        <div className="insight-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="insight-card mx-4 w-full max-w-sm overflow-hidden rounded-3xl bg-white ring-1 ring-black/5">
+            <div className="bg-gradient-to-br from-pink-100 via-purple-50 to-sky-100 px-6 py-8 text-center">
+              <div className="mb-3 text-5xl">{sessionInsight.emoji}</div>
+              <h3 className="mb-2 text-lg font-bold text-slate-800">{sessionInsight.title}</h3>
+              <p className="mb-4 text-sm leading-relaxed text-slate-600">{sessionInsight.body}</p>
+              <p className="text-xs font-medium text-pink-500">{sessionInsight.encouragement}</p>
+            </div>
+            <div className="flex items-center justify-center border-t border-slate-100 px-6 py-4">
+              <button
+                onClick={handleCloseInsight}
+                className="rounded-full bg-gradient-to-r from-pink-400 to-purple-400 px-8 py-2.5 text-sm font-medium text-white transition-all hover:brightness-105 active:scale-95"
+              >
+                おわる
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

@@ -126,7 +126,7 @@ const phaseInstructions = {
 
 // --- Step 2a: システムインストラクション ---
 export const getChatSystemInstruction = (userInfo = {}, options = {}) => {
-  const { userProfile = null, lastSession = null, historyLength = 0 } = options;
+  const { userProfile = null, lastSession = null, historyLength = 0, weatherContext = null, seasonalContext = null, streakDays = 0 } = options;
   const userName = userInfo.name || '';
   const phase = getConversationPhase(historyLength);
   const isFirstMessage = historyLength === 0;
@@ -343,6 +343,39 @@ export const getChatSystemInstruction = (userInfo = {}, options = {}) => {
     '※ 挨拶や話題選びの参考にする。朝なら「おはよう」、夕方なら「お疲れ様」など自然に',
     '',
   );
+
+  // 天気コンテキスト
+  if (weatherContext) {
+    lines.push(
+      '## 今日の天気',
+      weatherContext.description,
+      weatherContext.hint ? `※ ${weatherContext.hint}` : '',
+      '※ 天気の話は序盤の自然なきっかけ。毎回触れる必要はない。「天気予報によると」とは言わない',
+      '',
+    );
+  }
+
+  // 連続出席ストリーク
+  if (streakDays >= 3 && phase === 'opening') {
+    lines.push(
+      '## 出席ストリーク',
+      `相手は${streakDays}日連続で来てくれています。`,
+      streakDays >= 7 ? '※ 1週間以上連続！すごいことなので素直に伝えていい（「1週間連続ですね！すごい」）'
+        : streakDays >= 5 ? '※ 5日以上連続。「毎日来てくれて嬉しい」的に軽く触れてもいい'
+        : '※ 連続で来てくれていること自体が素晴らしい。押しつけがましくならない程度に触れてもいい',
+      '※ 毎回言及しない。2-3回に1回くらい。ストリーク数を正確に言う必要もない',
+      '',
+    );
+  }
+
+  // 季節・祝日イベント
+  if (seasonalContext && seasonalContext.length > 0) {
+    lines.push('## 季節・イベント');
+    for (const item of seasonalContext) {
+      lines.push(`- ${item.name}: ${item.hint}`);
+    }
+    lines.push('※ 自然な会話のきっかけとして。無理に触れなくてOK', '');
+  }
 
   lines.push(
     '## 返答モード（最重要 - 必ず最初に指定）',
