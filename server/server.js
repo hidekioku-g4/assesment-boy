@@ -2081,8 +2081,7 @@ ${chatText.slice(0, 3000)}` }],
       },
     }, 'session-insight');
 
-    const text = result?.candidates?.[0]?.content?.parts?.[0]?.text
-      || result?.text?.() || '{}';
+    const text = (result?.text ?? '').trim() || '{}';
     let insight;
     try {
       insight = JSON.parse(text);
