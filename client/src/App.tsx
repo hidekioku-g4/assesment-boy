@@ -1039,7 +1039,7 @@ function ChatPanel({
   const wsRef = useRef<WebSocket | null>(null);
   const wsReadyRef = useRef(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | AudioWorkletNode | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const prebufferRef = useRef<ArrayBuffer[]>([]);
   const transcriptRef = useRef<string[]>([]);
@@ -2036,6 +2036,25 @@ function ChatPanel({
                       speakReply(pendingTtsText.trim(), { append: true });
                       pendingTtsText = '';
                     }
+                  } else if (data.type === 'replace') {
+                    // 安全フィルターによる応答差し替え
+                    const safeText = data.text || '';
+                    const modeResult = parseMode(safeText);
+                    replyMode = modeResult.mode;
+                    const expResult = parseExpression(modeResult.cleanText);
+                    setAvatarExpression(expResult.expression);
+                    rawTtsText = expResult.cleanText;
+                    pendingTtsText = expResult.cleanText;
+                    fullReply = safeText;
+                    tagsParsed = true;
+                    stopAllTts();
+                    setMessages((prev) =>
+                      prev.map((m) =>
+                        m.id === assistantMessageId ? { ...m, text: stripFurigana(rawTtsText) } : m
+                      )
+                    );
+                    assistantMessageInserted = true;
+                    hasStartedTts = false;
                   } else if (data.type === 'done') {
                     // silent でここまで来ることは通常ないが念のため
                     if (replyMode === 'silent') break;
@@ -2393,43 +2412,19 @@ function ChatPanel({
       });
 
       const source = ctx.createMediaStreamSource(stream);
-      const processor = ctx.createScriptProcessor(chunkSize, source.channelCount || 1, 1);
-      processorRef.current = processor;
 
-      processor.addEventListener('audioprocess', (event: AudioProcessingEvent) => {
-        const input = event.inputBuffer;
-        let channel: Float32Array;
-        if (input.numberOfChannels === 2) {
-          const left = input.getChannelData(0);
-          const right = input.getChannelData(1);
-          channel = new Float32Array(left.length);
-          for (let i = 0; i < left.length; i += 1) {
-            channel[i] = (left[i] + right[i]) / 2;
-          }
-        } else {
-          channel = input.getChannelData(0);
-        }
+      // AudioWorklet（メインスレッド非ブロッキング）を優先、非対応時は ScriptProcessorNode にフォールバック
+      let workletNode: AudioWorkletNode | null = null;
+      let legacyProcessor: ScriptProcessorNode | null = null;
 
-        // 先に RMS を計算（バージイン判定に必要）
-        let sum = 0;
-        for (let i = 0; i < channel.length; i += 1) {
-          const sample = channel[i];
-          sum += sample * sample;
-        }
-        const rms = Math.sqrt(sum / channel.length);
-
-        // AI が喋っている／考えている間の処理
+      const handleAudioChunk = (rms: number, audioPayload: ArrayBuffer) => {
         const aiBusy = ttsSpeakingRef.current || statusRef.current === 'running';
         if (aiBusy) {
-          // バージイン検出: 高RMSが連続 BARGE_IN_CONSECUTIVE_FRAMES フレーム続いたら割り込み
           if (rms > BARGE_IN_RMS_THRESHOLD) {
-            // 候補フレームをペイロード化して保留（頭切れ防止用）
-            const payloadCandidate = floatTo16LE(channel);
-            bargeInPendingFramesRef.current.push(payloadCandidate);
+            bargeInPendingFramesRef.current.push(audioPayload);
             bargeInFrameCountRef.current += 1;
             if (bargeInFrameCountRef.current >= BARGE_IN_CONSECUTIVE_FRAMES) {
               triggerBargeIn('user started speaking');
-              // 保留していたフレームを Deepgram に flush（頭切れ防止）
               const pending = bargeInPendingFramesRef.current;
               bargeInPendingFramesRef.current = [];
               const client = wsRef.current;
@@ -2438,46 +2433,39 @@ function ChatPanel({
                   try { client.send(p); } catch { /* ignore */ }
                 }
               } else {
-                // まだ ws 準備できていなければ prebuffer へ
                 prebufferRef.current.push(...pending);
               }
-              // このフレームはもう送信済み相当なのでここで return
               if (rms > AUTO_SEND_RMS_THRESHOLD) {
                 lastVoiceActivityRef.current = Date.now();
                 scheduleAutoSend();
               }
-              return;
-            } else {
-              return; // まだ判定中、保留バッファに積むだけ
             }
           } else {
-            // 静音: カウンタと保留バッファをリセット
             bargeInFrameCountRef.current = 0;
             bargeInPendingFramesRef.current = [];
-            return;
           }
-        } else {
-          bargeInFrameCountRef.current = 0;
-          bargeInPendingFramesRef.current = [];
+          return;
+        }
 
-          // 相槌: ユーザー発話中のポーズを検出して自動再生
-          if (rms > AUTO_SEND_RMS_THRESHOLD) {
-            aizuchiSpeechFramesRef.current += 1;
-            aizuchiSilenceFramesRef.current = 0;
-          } else if (aizuchiSpeechFramesRef.current > 50) {
-            // ~2秒以上話した後のポーズ検出（14フレーム ≈ 600ms）
-            aizuchiSilenceFramesRef.current += 1;
-            if (aizuchiSilenceFramesRef.current === 14 && isAizuchiReady()) {
-              const audioCtx = ttsAudioCtxRef.current;
-              if (audioCtx && audioCtx.state === 'running') {
-                const pick = pickInstantAizuchi();
-                if (pick) {
-                  const tracking = playAizuchiBuffer(audioCtx, pick.buffer, ttsAnalyserRef.current, pick.id);
-                  ttsActiveSourcesRef.current.push(tracking);
-                  tracking.source.onended = () => {
-                    ttsActiveSourcesRef.current = ttsActiveSourcesRef.current.filter((s) => s.source !== tracking.source);
-                  };
-                }
+        bargeInFrameCountRef.current = 0;
+        bargeInPendingFramesRef.current = [];
+
+        // 相槌: ユーザー発話中のポーズ検出
+        if (rms > AUTO_SEND_RMS_THRESHOLD) {
+          aizuchiSpeechFramesRef.current += 1;
+          aizuchiSilenceFramesRef.current = 0;
+        } else if (aizuchiSpeechFramesRef.current > 50) {
+          aizuchiSilenceFramesRef.current += 1;
+          if (aizuchiSilenceFramesRef.current === 14 && isAizuchiReady()) {
+            const aCtx = ttsAudioCtxRef.current;
+            if (aCtx && aCtx.state === 'running') {
+              const pick = pickInstantAizuchi();
+              if (pick) {
+                const tracking = playAizuchiBuffer(aCtx, pick.buffer, ttsAnalyserRef.current, pick.id);
+                ttsActiveSourcesRef.current.push(tracking);
+                tracking.source.onended = () => {
+                  ttsActiveSourcesRef.current = ttsActiveSourcesRef.current.filter((s) => s.source !== tracking.source);
+                };
               }
             }
           }
@@ -2487,21 +2475,56 @@ function ChatPanel({
           lastVoiceActivityRef.current = Date.now();
           scheduleAutoSend();
         }
-        const payload = floatTo16LE(channel);
+
         const client = wsRef.current;
         if (client && client.readyState === WebSocket.OPEN && wsReadyRef.current) {
-          client.send(payload);
+          client.send(audioPayload);
         } else {
           const queue = prebufferRef.current;
-          queue.push(payload);
+          queue.push(audioPayload);
           if (queue.length > prebufferMax) {
             queue.splice(0, queue.length - prebufferMax);
           }
         }
-      });
+      };
 
-      source.connect(processor);
-      processor.connect(ctx.destination);
+      try {
+        await ctx.audioWorklet.addModule('./voice-processor.js');
+        workletNode = new AudioWorkletNode(ctx, 'voice-processor', {
+          processorOptions: { chunkSize },
+        });
+        workletNode.port.onmessage = (e: MessageEvent) => {
+          handleAudioChunk(e.data.rms, e.data.audio);
+        };
+        source.connect(workletNode);
+        workletNode.connect(ctx.destination);
+        console.log('[voice] using AudioWorklet');
+      } catch (workletErr) {
+        console.warn('[voice] AudioWorklet not available, falling back to ScriptProcessorNode', workletErr);
+        legacyProcessor = ctx.createScriptProcessor(chunkSize, source.channelCount || 1, 1);
+        processorRef.current = legacyProcessor;
+
+        legacyProcessor.addEventListener('audioprocess', (event: AudioProcessingEvent) => {
+          const input = event.inputBuffer;
+          let channel: Float32Array;
+          if (input.numberOfChannels === 2) {
+            const left = input.getChannelData(0);
+            const right = input.getChannelData(1);
+            channel = new Float32Array(left.length);
+            for (let i = 0; i < left.length; i++) channel[i] = (left[i] + right[i]) / 2;
+          } else {
+            channel = input.getChannelData(0);
+          }
+          let sum = 0;
+          for (let i = 0; i < channel.length; i++) sum += channel[i] * channel[i];
+          const rms = Math.sqrt(sum / channel.length);
+          const payload = floatTo16LE(channel);
+          handleAudioChunk(rms, payload);
+        });
+
+        source.connect(legacyProcessor);
+        legacyProcessor.connect(ctx.destination);
+      }
 
       ws.addEventListener('message', (event) => {
         try {

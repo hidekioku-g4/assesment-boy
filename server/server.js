@@ -18,6 +18,7 @@ import { getChatPrompt, getChatSystemInstruction, buildGeminiContents, buildCurr
 import { getSessionSummaryPrompt, getAgendaSuggestionPrompt } from './prompts/session-summary.js';
 import { getFaceFeedbackPrompt } from './prompts/face-feedback.js';
 import { getMetaSummaryPrompt } from './prompts/meta-summary.js';
+import { detectCrisis, getCrisisContext, checkOutputSafety, SAFE_FALLBACK_RESPONSE } from './safety.js';
 import { fetchParticipants, insertSupportRecord, insertSessionSummary, fetchSessionSummaries, fetchUserProfile, upsertUserProfile, countSessionSummaries, fetchSuggestedTopics } from './bigquery.js';
 import { synthesize as ttsSynthesize, getVoices as ttsGetVoices } from './tts/index.js';
 import { preprocessTtsText, warmupTokenizer } from './tts/preprocess.js';
@@ -1125,8 +1126,21 @@ app.post('/api/chat-stream', async (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
 
   try {
+    // 危機検出（LLM前段）
+    const crisis = detectCrisis(message);
+    if (crisis.level !== 'none') {
+      console.log(`[chat-stream] crisis detected: level=${crisis.level}, patterns=${crisis.matched.join(',')}`);
+    }
+
     const userProfile = await getCachedProfile(msAccountId);
-    const systemInstruction = getChatSystemInstruction(userInfo, { userProfile, historyLength: history.length });
+    let systemInstruction = getChatSystemInstruction(userInfo, { userProfile, historyLength: history.length });
+
+    // 危機レベルに応じてプロンプトに追加コンテキストを注入
+    const crisisContext = getCrisisContext(crisis.level);
+    if (crisisContext) {
+      systemInstruction = crisisContext + '\n\n' + systemInstruction;
+    }
+
     const contents = [
       ...buildGeminiContents(history),
       buildCurrentUserMessage(message, trimmedContext, faceAnalysis),
@@ -1161,7 +1175,15 @@ app.post('/api/chat-stream', async (req, res) => {
     const geminiEnd = Date.now();
     console.log(`[chat-stream] done - Gemini: ${geminiEnd - geminiStart}ms, Total: ${Date.now() - startTime}ms, reply: ${fullText.length}chars`);
 
-    res.write(`data: ${JSON.stringify({ type: 'done', fullText: fullText.trim() })}\n\n`);
+    // 出力安全フィルター
+    const safetyCheck = checkOutputSafety(fullText);
+    if (!safetyCheck.safe) {
+      console.warn(`[chat-stream] UNSAFE output blocked: ${safetyCheck.reason}`);
+      res.write(`data: ${JSON.stringify({ type: 'replace', text: SAFE_FALLBACK_RESPONSE })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'done', fullText: SAFE_FALLBACK_RESPONSE })}\n\n`);
+    } else {
+      res.write(`data: ${JSON.stringify({ type: 'done', fullText: fullText.trim() })}\n\n`);
+    }
     res.end();
   } catch (error) {
     const summary = summarizeGeminiError(error);
