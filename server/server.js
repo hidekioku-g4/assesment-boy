@@ -2051,10 +2051,11 @@ app.post('/api/session-insight', async (req, res) => {
     return res.status(500).json({ error: 'Gemini API key not configured' });
   }
 
-  const { chatText, userName } = req.body || {};
+  const { chatText, userName: rawUserName } = req.body || {};
   if (!chatText) {
     return res.status(400).json({ error: 'chat_text_required' });
   }
+  const userName = (typeof rawUserName === 'string' ? rawUserName : '').replace(/[^\p{L}\p{N}\s]/gu, '').slice(0, 30);
 
   console.log('[session-insight] generating...');
 

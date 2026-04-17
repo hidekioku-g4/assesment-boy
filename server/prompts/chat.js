@@ -20,27 +20,31 @@ const formatFaceAnalysis = (faceAnalysis) => {
   return parts.length > 0 ? parts.join('。') : null;
 };
 
+// --- JST ヘルパー ---
+const jstFmt = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', weekday: 'short' });
+const getJST = () => {
+  const parts = Object.fromEntries(jstFmt.formatToParts(new Date()).map(p => [p.type, p.value]));
+  return { hour: +parts.hour, weekday: parts.weekday };
+};
+
 // --- 時間帯・曜日ヘルパー ---
 const getTimeContext = () => {
-  const now = new Date();
-  // JST = UTC+9
-  const jstHour = (now.getUTCHours() + 9) % 24;
-  const jstDay = new Date(now.getTime() + 9 * 60 * 60 * 1000).getDay();
+  const { hour, weekday } = getJST();
 
   let timeOfDay;
-  if (jstHour >= 5 && jstHour < 11) timeOfDay = '朝';
-  else if (jstHour >= 11 && jstHour < 14) timeOfDay = '昼';
-  else if (jstHour >= 14 && jstHour < 17) timeOfDay = '午後';
-  else if (jstHour >= 17 && jstHour < 20) timeOfDay = '夕方';
+  if (hour >= 5 && hour < 11) timeOfDay = '朝';
+  else if (hour >= 11 && hour < 14) timeOfDay = '昼';
+  else if (hour >= 14 && hour < 17) timeOfDay = '午後';
+  else if (hour >= 17 && hour < 20) timeOfDay = '夕方';
   else timeOfDay = '夜';
 
-  const dayNames = ['日', '月', '火', '水', '木', '金', '土'];
+  const dayIdx = ['日', '月', '火', '水', '木', '金', '土'].indexOf(weekday);
   let dayNote = '';
-  if (jstDay === 1) dayNote = '（週の始まり）';
-  else if (jstDay === 5) dayNote = '（もうすぐ週末）';
-  else if (jstDay === 0 || jstDay === 6) dayNote = '（休日）';
+  if (dayIdx === 1) dayNote = '（週の始まり）';
+  else if (dayIdx === 5) dayNote = '（もうすぐ週末）';
+  else if (dayIdx === 0 || dayIdx === 6) dayNote = '（休日）';
 
-  return `現在: ${dayNames[jstDay]}曜日${dayNote}の${timeOfDay}`;
+  return `現在: ${weekday}曜日${dayNote}の${timeOfDay}`;
 };
 
 // --- 会話フェーズ判定（ユーザーターン数基準） ---
@@ -53,7 +57,7 @@ const getConversationPhase = (historyLength) => {
 
 // --- 曜日別 opening ヒント ---
 const getDayHint = () => {
-  const jstDay = new Date(Date.now() + 9 * 60 * 60 * 1000).getDay();
+  const jstDay = ['日', '月', '火', '水', '木', '金', '土'].indexOf(getJST().weekday);
   const hints = [
     '休日。「ゆっくりできました？」のように週末の過ごし方を軽く',
     '週の始まり。「今週もよろしくね」的な軽い声かけ',

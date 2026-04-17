@@ -1,5 +1,11 @@
 // server/context-enrichment.js — 天気・祝日・季節イベントのコンテキスト生成
 
+const jstFormatter = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+function getJSTDate(date = new Date()) {
+  const parts = Object.fromEntries(jstFormatter.formatToParts(date).map(p => [p.type, p.value]));
+  return { year: +parts.year, month: +parts.month, day: +parts.day, hour: +parts.hour, minute: +parts.minute };
+}
+
 const TOKYO_LAT = 35.6762;
 const TOKYO_LON = 139.6503;
 const WEATHER_CACHE_TTL_MS = 30 * 60 * 1000; // 30分
@@ -132,18 +138,16 @@ const SEASONAL_EVENTS = [
  * 今日の祝日・イベントコンテキストを取得
  */
 export function getSeasonalContext() {
-  const now = new Date(Date.now() + 9 * 60 * 60 * 1000); // JST
-  const mmdd = `${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const jst = getJSTDate();
+  const mmdd = `${String(jst.month).padStart(2, '0')}-${String(jst.day).padStart(2, '0')}`;
 
   const parts = [];
 
-  // 祝日チェック
   const holiday = JAPANESE_HOLIDAYS[mmdd];
   if (holiday) {
     parts.push({ type: 'holiday', name: holiday, hint: `今日は${holiday}。さりげなく触れてもいい` });
   }
 
-  // 季節イベントチェック
   for (const event of SEASONAL_EVENTS) {
     if (mmdd >= event.start && mmdd <= event.end) {
       parts.push({ type: 'season', name: event.event, hint: event.hint });
@@ -152,8 +156,8 @@ export function getSeasonalContext() {
   }
 
   // 明日が祝日かチェック（前日の話題として）
-  const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-  const tmrMmdd = `${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
+  const tmr = getJSTDate(new Date(Date.now() + 24 * 60 * 60 * 1000));
+  const tmrMmdd = `${String(tmr.month).padStart(2, '0')}-${String(tmr.day).padStart(2, '0')}`;
   const tmrHoliday = JAPANESE_HOLIDAYS[tmrMmdd];
   if (tmrHoliday && !holiday) {
     parts.push({ type: 'upcoming', name: tmrHoliday, hint: `明日は${tmrHoliday}。「明日は${tmrHoliday}ですね！」的に触れてもいい` });

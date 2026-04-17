@@ -963,8 +963,9 @@ function ChatPanel({
     try {
       const key = 'assess-kun:streak';
       const stored = JSON.parse(localStorage.getItem(key) || '{}');
-      const today = new Date().toISOString().slice(0, 10);
-      const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+      const jstDate = (d: Date) => d.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+      const today = jstDate(new Date());
+      const yesterday = jstDate(new Date(Date.now() - 86400000));
       if (stored.lastDate === today) {
         setStreakDays(stored.count || 1);
         return stored.count || 1;
@@ -2042,19 +2043,20 @@ function ChatPanel({
                       }
 
                       // respond / aizuchi は表情タグも消費してから本文を進める
-                      // 表情タグが完成していれば解析、まだなら次チャンクを待つ
-                      if (afterMode.includes(']')) {
+                      const hasExpressionStart = afterMode.includes('[表情:');
+                      if (hasExpressionStart && !afterMode.includes(']')) {
+                        // 表情タグが途中（閉じ括弧未着）→ 次チャンク待ち
+                        continue;
+                      }
+                      if (hasExpressionStart) {
                         const expResult = parseExpression(afterMode);
                         setAvatarExpression(expResult.expression);
                         ttsEmotionRef.current = expResult.expression;
                         afterMode = expResult.cleanText;
-                        tagsParsed = true;
-                        rawTtsText = afterMode;
-                        pendingTtsText = afterMode;
-                      } else {
-                        // 表情タグがまだ来てない。次チャンク待ち
-                        continue;
                       }
+                      tagsParsed = true;
+                      rawTtsText = afterMode;
+                      pendingTtsText = afterMode;
                     } else {
                       rawTtsText += data.text;
                       pendingTtsText += data.text;
@@ -2600,17 +2602,21 @@ function ChatPanel({
             console.log('[voice-ws] dg_open received, setting ready');
             wsReadyRef.current = true;
             setVoiceInitStatus('ready');
-            const queue = prebufferRef.current;
-            if (queue.length > 0 && ws.readyState === WebSocket.OPEN) {
-              queue.forEach((payload) => {
-                try {
-                  ws.send(payload);
-                } catch {
-                  // ignore send errors
-                }
-              });
-              prebufferRef.current = [];
+            // AI応答中はTTSエコーを含むプリバッファを送らない（非busy時に自然にdirect送信に切り替わる）
+            const aiBusyNow = ttsSpeakingRef.current || statusRef.current === 'running';
+            if (!aiBusyNow) {
+              const queue = prebufferRef.current;
+              if (queue.length > 0 && ws.readyState === WebSocket.OPEN) {
+                queue.forEach((payload) => {
+                  try {
+                    ws.send(payload);
+                  } catch {
+                    // ignore send errors
+                  }
+                });
+              }
             }
+            prebufferRef.current = [];
             return;
           }
           if (data.type === 'finalize_ack') {
