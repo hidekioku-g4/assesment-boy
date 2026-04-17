@@ -1090,7 +1090,7 @@ function ChatPanel({
   const BARGE_IN_RMS_THRESHOLD = 0.025;
   // 連続何フレームで「本物のユーザー発話」と判定するか (2048samples/48kHz≒43ms × 4 ≈ 170ms)
   const BARGE_IN_CONSECUTIVE_FRAMES = 4;
-  const PREBUFFER_MS = 2000;
+  const PREBUFFER_MS = 4000;
 
   const voiceSupported =
     typeof navigator !== 'undefined' && Boolean(navigator.mediaDevices?.getUserMedia);
@@ -2277,9 +2277,9 @@ function ChatPanel({
       finalizeVoiceCapture();
 
       if (shouldSend && transcript) {
-        await sendChatMessage(transcript);
         setVoiceStatus('idle');
         setVoiceError(null);
+        void sendChatMessage(transcript);
       } else if (shouldSend) {
         setVoiceStatus('error');
       } else {
@@ -2428,11 +2428,6 @@ function ChatPanel({
       setVoiceError('この環境では音声入力が利用できません。');
       return;
     }
-    if (status === 'running') {
-      setVoiceStatus('error');
-      setVoiceError('返信中は音声入力を開始できません。');
-      return;
-    }
     if (voiceStatus === 'listening') return;
 
     finalizeOnceRef.current = false;
@@ -2511,6 +2506,10 @@ function ChatPanel({
             bargeInFrameCountRef.current = 0;
             bargeInPendingFramesRef.current = [];
           }
+          // AI応答中でもプリバッファに蓄積（頭切れ防止）
+          const q = prebufferRef.current;
+          q.push(audioPayload);
+          if (q.length > prebufferMax) q.splice(0, q.length - prebufferMax);
           return;
         }
 
