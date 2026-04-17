@@ -4,20 +4,14 @@
 
 :root {
   color-scheme: light;
-  --accent: #ff7a1a;
+  --accent: #d4587a;
   --accent-foreground: #fff;
   --sidebar-bg: #0f172a;
 }
 
 body {
-  font-family: 'Inter', 'Noto Sans JP', system-ui, -apple-system, BlinkMacSystemFont,
+  font-family: 'M PLUS Rounded 1c', 'Noto Sans JP', system-ui, -apple-system, BlinkMacSystemFont,
     'Segoe UI', sans-serif;
-}
-
-*,
-*::before,
-*::after {
-  box-shadow: none !important;
 }
 
 .scrollbar-thin {

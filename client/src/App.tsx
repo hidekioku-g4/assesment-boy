@@ -2708,9 +2708,9 @@ function ChatPanel({
       <header className="flex-shrink-0 flex items-center justify-between px-4 py-2 border-b border-slate-100">
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold text-slate-900">会話</h2>
-          {chatStarted && <span className="text-[10px] text-slate-400">当日分のみ</span>}
+          {chatStarted && <span className="text-xs text-slate-400">当日分のみ</span>}
           {chatStarted && streakDays >= 2 && (
-            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 text-[10px] font-medium">
+            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 text-xs font-medium">
               <span className="text-xs">{'🔥'}</span>{streakDays}日連続
             </span>
           )}
@@ -2970,11 +2970,11 @@ function ChatPanel({
             earOnlyMode ? "absolute bottom-4 left-4 right-4 max-h-[180px]" : "flex-1"
           )}>
           {/* コントロールバー（コンパクト） */}
-          <div className="flex-shrink-0 flex flex-wrap items-center gap-2 text-[11px]">
+          <div className="flex-shrink-0 flex flex-wrap items-center gap-2 text-xs">
             <button
               onClick={() => setEarOnlyMode(!earOnlyMode)}
               className={cn(
-                "px-2 py-0.5 rounded text-[11px] font-medium border transition-colors",
+                "px-2 py-0.5 rounded text-xs font-medium border transition-colors",
                 earOnlyMode
                   ? "bg-pink-100 border-pink-300 text-pink-700"
                   : "bg-slate-50 border-slate-300 text-slate-600 hover:bg-slate-100"
@@ -2985,7 +2985,7 @@ function ChatPanel({
             <select
               value={inputMode}
               onChange={(e) => setInputMode(e.target.value as typeof inputMode)}
-              className="text-[11px] border border-slate-300 rounded px-1.5 py-0.5 bg-white"
+              className="text-xs border border-slate-300 rounded px-1.5 py-0.5 bg-white"
             >
               <option value="auto-smart">自動(賢い)</option>
               <option value="auto-slow">自動(遅め)</option>
@@ -2999,7 +2999,7 @@ function ChatPanel({
                   variant={voiceStatus === 'listening' ? 'outline' : 'default'}
                   onClick={() => (voiceStatus === 'listening' ? stopVoiceCapture(true) : startVoiceCapture())}
                   disabled={voiceButtonDisabled}
-                  className="text-[11px] px-2 py-1 h-auto"
+                  className="text-xs px-2 py-1 h-auto"
                 >
                   {voiceButtonLabel}
                 </Button>
@@ -3008,7 +3008,7 @@ function ChatPanel({
                     size="sm"
                     onClick={handleManualVoiceSend}
                     disabled={status === 'running'}
-                    className="bg-green-600 hover:bg-green-700 text-[11px] px-2 py-1 h-auto"
+                    className="bg-green-600 hover:bg-green-700 text-xs px-2 py-1 h-auto"
                   >
                     送信
                   </Button>
@@ -3118,7 +3118,7 @@ function ChatPanel({
                   'flex-1 min-h-[2.5rem] max-h-20 resize-none rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-1',
                   status === 'running'
                     ? 'border-slate-100 bg-slate-50 text-slate-400 cursor-not-allowed'
-                    : 'border-slate-200 bg-white focus:border-pink-300 focus:ring-pink-200'
+                    : 'border-slate-200 bg-white focus:border-accent focus:ring-accent/40'
                 )}
               />
               <div className="flex gap-1">
@@ -7072,7 +7072,7 @@ useEffect(() => {
 
           <div className="space-y-1">
 
-            <div className="text-[12px] uppercase tracking-[0.45em] text-white/70">Good Morning</div>
+            <div className="text-xs uppercase tracking-[0.45em] text-white/70">Good Morning</div>
 
             <div className="text-2xl font-extrabold tracking-wide">アセス君</div>
 
@@ -7173,17 +7173,17 @@ useEffect(() => {
             </div>
 
             <div className="ml-auto flex flex-wrap items-center gap-3 text-sm text-slate-500">
-              <div className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] text-slate-600 shadow-sm">
+              <div className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600 shadow-sm">
                 <span className={cn('h-2 w-2 rounded-full', msIndicatorClass)} aria-hidden />
                 <div className="flex flex-col leading-tight">
-                  <span className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-400">Microsoft</span>
-                  <span className="max-w-[140px] truncate text-[11px]">{msStatusText}</span>
+                  <span className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">Microsoft</span>
+                  <span className="max-w-[140px] truncate text-xs">{msStatusText}</span>
                 </div>
                 {msAuthEnabled && (
                   <Button
                     size="sm"
                     variant="outline"
-                    className="ml-1 h-7 rounded-full px-3 text-[11px]"
+                    className="ml-1 h-7 rounded-full px-3 text-xs"
                     onClick={msActionHandler}
                     disabled={msAuthStatus === 'running'}
                   >
@@ -7192,7 +7192,7 @@ useEffect(() => {
                 )}
               </div>
               {isElectron && (
-                <div className="flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 shadow-sm">
+                <div className="flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 shadow-sm">
                   <Button
                     size="sm"
                     variant="outline"
@@ -7280,7 +7280,7 @@ useEffect(() => {
                   busy={supportRecordDraftStatus === 'running'}
                 />
                 {(draftUsageLabel || refineUsageLabel) && (
-                  <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-[11px] text-slate-600">
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
                     <div className="font-semibold text-slate-500">Geminiトークン</div>
                     {draftUsageLabel && <div>ドラフト: {draftUsageLabel}</div>}
                     {refineUsageLabel && <div>リファイン: {refineUsageLabel}</div>}
@@ -7303,15 +7303,15 @@ useEffect(() => {
                         {agendaStatus === 'running' ? '生成中…' : '提案を生成'}
                       </Button>
                       {agendaStatus === 'error' && (
-                        <span className="text-[11px] font-medium text-red-600">生成に失敗しました</span>
+                        <span className="text-xs font-medium text-red-600">生成に失敗しました</span>
                       )}
                       {agendaStatus === 'success' && (
-                        <span className="text-[11px] font-medium text-emerald-600">最新の提案を表示中</span>
+                        <span className="text-xs font-medium text-emerald-600">最新の提案を表示中</span>
                       )}
                     </div>
                   </div>
                   {agendaUsageLabel && (
-                    <div className="mt-2 text-[11px] text-slate-500">
+                    <div className="mt-2 text-xs text-slate-500">
                       Geminiトークン: {agendaUsageLabel}
                     </div>
                   )}
@@ -7336,7 +7336,7 @@ useEffect(() => {
                                 {index + 1}. {item.title}
                               </h4>
                               {item.relatedSections && item.relatedSections.length > 0 && (
-                                <span className="text-[11px] text-slate-500">
+                                <span className="text-xs text-slate-500">
                                   関連: {item.relatedSections.join(', ')}
                                 </span>
                               )}
@@ -7625,7 +7625,7 @@ useEffect(() => {
 
                         className={cn(
 
-                          'rounded-2xl border px-5 py-4 text-left shadow-sm transition hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-pink-200',
+                          'rounded-2xl border px-5 py-4 text-left shadow-sm transition hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-accent/40',
 
                           isActive ? 'border-pink-400 bg-pink-50' : 'border-slate-200 bg-white',
 
@@ -7701,7 +7701,7 @@ useEffect(() => {
                         sessionDate: event.target.value,
                       }))
                     }
-                    className="w-full rounded-2xl border border-slate-200 px-4 py-2 text-sm shadow-sm focus:border-pink-300 focus:outline-none focus:ring-2 focus:ring-pink-200"
+                    className="w-full rounded-2xl border border-slate-200 px-4 py-2 text-sm shadow-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40"
                   />
                 </div>
               </section>
@@ -7726,7 +7726,7 @@ useEffect(() => {
                         }
                         onFocus={() => openParticipantList('facilitator')}
                         onBlur={() => closeParticipantList('facilitator')}
-                        className="w-full rounded-2xl border border-slate-200 px-4 py-2 text-sm shadow-sm focus:border-pink-300 focus:outline-none focus:ring-2 focus:ring-pink-200"
+                        className="w-full rounded-2xl border border-slate-200 px-4 py-2 text-sm shadow-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40"
                         placeholder="例: 佐藤 支援員"
                         autoComplete="off"
                       />
@@ -7754,7 +7754,7 @@ useEffect(() => {
                                       {item.name || item.id}
                                     </span>
                                     {meta && (
-                                      <span className="text-[11px] text-slate-500">
+                                      <span className="text-xs text-slate-500">
                                         {meta}
                                       </span>
                                     )}
@@ -7784,7 +7784,7 @@ useEffect(() => {
                         }
                         onFocus={() => openParticipantList('talent')}
                         onBlur={() => closeParticipantList('talent')}
-                        className="w-full rounded-2xl border border-slate-200 px-4 py-2 text-sm shadow-sm focus:border-pink-300 focus:outline-none focus:ring-2 focus:ring-pink-200"
+                        className="w-full rounded-2xl border border-slate-200 px-4 py-2 text-sm shadow-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40"
                         placeholder="例: 田中 花子"
                         autoComplete="off"
                       />
@@ -7812,7 +7812,7 @@ useEffect(() => {
                                       {item.name || item.id}
                                     </span>
                                     {meta && (
-                                      <span className="text-[11px] text-slate-500">
+                                      <span className="text-xs text-slate-500">
                                         {meta}
                                       </span>
                                     )}
@@ -8071,7 +8071,7 @@ useEffect(() => {
                                   <div className="flex flex-wrap items-center justify-between gap-2">
                                     <div>
                                       <p className="text-xs font-semibold text-slate-600">セクション</p>
-                                      <p className="text-[11px] text-slate-500">
+                                      <p className="text-xs text-slate-500">
                                         この面談タイプに表示する項目を編集します。
                                       </p>
                                     </div>
@@ -8095,7 +8095,7 @@ useEffect(() => {
                                             <p className="text-xs font-semibold text-slate-700">
                                               セクション {sectionIndex + 1}
                                             </p>
-                                            <p className="text-[11px] text-slate-400">{section.id || 'id未設定'}</p>
+                                            <p className="text-xs text-slate-400">{section.id || 'id未設定'}</p>
                                           </div>
                                           <Button
                                             size="sm"
@@ -8108,7 +8108,7 @@ useEffect(() => {
                                         </div>
                                         <div className="mt-3 grid gap-3 md:grid-cols-2">
                                           <div className="space-y-1">
-                                            <label className="text-[11px] font-semibold text-slate-600">id</label>
+                                            <label className="text-xs font-semibold text-slate-600">id</label>
                                             <input
                                               value={section.id}
                                               onChange={(event) =>
@@ -8122,7 +8122,7 @@ useEffect(() => {
                                             />
                                           </div>
                                           <div className="space-y-1">
-                                            <label className="text-[11px] font-semibold text-slate-600">title</label>
+                                            <label className="text-xs font-semibold text-slate-600">title</label>
                                             <input
                                               value={section.title}
                                               onChange={(event) =>
@@ -8141,7 +8141,7 @@ useEffect(() => {
                                             />
                                           </div>
                                           <div className="space-y-1 md:col-span-2">
-                                          <label className="text-[11px] font-semibold text-slate-600">書き方のヒント</label>
+                                          <label className="text-xs font-semibold text-slate-600">書き方のヒント</label>
                                             <textarea
                                               value={section.helperText}
                                               onChange={(event) =>
@@ -8160,7 +8160,7 @@ useEffect(() => {
                                             />
                                           </div>
                                           <div className="space-y-1 md:col-span-2">
-                                          <label className="text-[11px] font-semibold text-slate-600">記入例</label>
+                                          <label className="text-xs font-semibold text-slate-600">記入例</label>
                                             <textarea
                                               value={section.placeholder}
                                               onChange={(event) =>
@@ -8194,7 +8194,7 @@ useEffect(() => {
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
                           <h4 className="text-sm font-semibold text-slate-900">Geminiプロンプトの見え方</h4>
-                          <p className="text-[11px] text-slate-500">面談タイプを切り替えて影響を確認できます。</p>
+                          <p className="text-xs text-slate-500">面談タイプを切り替えて影響を確認できます。</p>
                         </div>
                         <Button
                           size="sm"
@@ -8206,7 +8206,7 @@ useEffect(() => {
                         </Button>
                       </div>
                       <div className="mt-3 space-y-2">
-                        <label className="text-[11px] font-semibold text-slate-600">プレビュー対象の面談タイプ</label>
+                        <label className="text-xs font-semibold text-slate-600">プレビュー対象の面談タイプ</label>
                         <select
                           value={configPreviewMeetingTypeId ?? ''}
                           onChange={(event) => setConfigPreviewMeetingTypeId(event.target.value || null)}
@@ -8218,12 +8218,12 @@ useEffect(() => {
                             </option>
                           ))}
                         </select>
-                        <div className="text-[11px] text-slate-500">
+                        <div className="text-xs text-slate-500">
                           表示セクション数: {configPromptSections.length}
                         </div>
                       </div>
                       <ScrollArea className="mt-3 h-[60vh] rounded-xl border border-slate-200 bg-slate-50 p-3">
-                        <pre className="whitespace-pre-wrap break-words text-[11px] text-slate-700">
+                        <pre className="whitespace-pre-wrap break-words text-xs text-slate-700">
                           {configPromptPreview || '---'}
                         </pre>
                       </ScrollArea>

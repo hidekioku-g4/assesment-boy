@@ -8,14 +8,14 @@ module.exports = {
         background: '#ffffff',
         foreground: '#111827',
         accent: {
-          DEFAULT: '#ff7a1a',
+          DEFAULT: '#d4587a',
           foreground: '#ffffff',
         },
         sidebar: '#0f172a',
       },
       fontFamily: {
         sans: [
-          'Inter',
+          '"M PLUS Rounded 1c"',
           '"Noto Sans JP"',
           'system-ui',
           '-apple-system',
@@ -23,9 +23,6 @@ module.exports = {
           '"Segoe UI"',
           'sans-serif',
         ],
-      },
-      boxShadow: {
-        none: '0 0 #0000',
       },
       borderRadius: {
         xl: '1.25rem',
