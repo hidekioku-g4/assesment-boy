@@ -2652,8 +2652,13 @@ function ChatPanel({
         }
       });
 
-      ws.addEventListener('close', () => {
+      ws.addEventListener('close', (ev) => {
         setVoiceInitStatus('idle');
+        if (ev.code === 4401) {
+          setVoiceStatus('error');
+          setVoiceError('認証エラー: ページを再読み込みしてください');
+          return;
+        }
         if (voiceStatus === 'listening' || voiceStatus === 'sending') {
           completeVoiceTranscript(true);
         }

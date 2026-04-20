@@ -84,10 +84,12 @@ export const verifyWsToken = async (token) => {
     const decoded = await verifyToken(token);
     const email = (decoded.preferred_username || decoded.email || '').toLowerCase();
     if (ALLOWED_DOMAIN && !email.endsWith(`@${ALLOWED_DOMAIN}`)) {
+      console.warn('[ws-auth] domain not allowed:', email);
       return null;
     }
     return decoded;
-  } catch {
+  } catch (err) {
+    console.warn('[ws-auth] token verification failed:', err.message);
     return null;
   }
 };
