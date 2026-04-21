@@ -7,7 +7,7 @@ type AizuchiEntry = {
 };
 
 // 即座の相槌に使う安全な短いフレーズのみ
-const INSTANT_IDS = ['un', 'unun', 'hee'];
+const INSTANT_IDS = ['un', 'unun'];
 const COOLDOWN_MS = 4000;
 
 let entries: AizuchiEntry[] = [];
@@ -71,7 +71,7 @@ export function playAizuchiBuffer(
   id: string,
 ): { source: AudioBufferSourceNode; gain: GainNode; endTime: number } {
   const gain = audioCtx.createGain();
-  gain.gain.value = 0.85;
+  gain.gain.value = 0.35;
 
   if (analyser) {
     gain.connect(analyser);
