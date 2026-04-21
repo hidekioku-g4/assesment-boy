@@ -2518,23 +2518,29 @@ function ChatPanel({
         bargeInFrameCountRef.current = 0;
         bargeInPendingFramesRef.current = [];
 
-        // 相槌: ユーザー発話中のポーズ検出
+        // 相槌: ユーザー発話中の短いポーズ検出
         if (rms > AUTO_SEND_RMS_THRESHOLD) {
           aizuchiSpeechFramesRef.current += 1;
           aizuchiSilenceFramesRef.current = 0;
         } else if (aizuchiSpeechFramesRef.current > 20) {
           aizuchiSilenceFramesRef.current += 1;
-          const jitter = Math.random() < 0.5 ? 0 : 1;
-          if (aizuchiSilenceFramesRef.current === 6 + jitter && isAizuchiReady()) {
-            const aCtx = ttsAudioCtxRef.current;
-            if (aCtx && aCtx.state === 'running') {
-              const pick = pickInstantAizuchi();
-              if (pick) {
-                const tracking = playAizuchiBuffer(aCtx, pick.buffer, ttsAnalyserRef.current, pick.id);
-                ttsActiveSourcesRef.current.push(tracking);
-                tracking.source.onended = () => {
-                  ttsActiveSourcesRef.current = ttsActiveSourcesRef.current.filter((s) => s.source !== tracking.source);
-                };
+          // 長い沈黙(700ms≈16フレーム)→発話終了とみなしリセット
+          if (aizuchiSilenceFramesRef.current > 16) {
+            aizuchiSpeechFramesRef.current = 0;
+            aizuchiSilenceFramesRef.current = 0;
+          } else {
+            const jitter = Math.random() < 0.5 ? 0 : 1;
+            if (aizuchiSilenceFramesRef.current === 6 + jitter && isAizuchiReady()) {
+              const aCtx = ttsAudioCtxRef.current;
+              if (aCtx && aCtx.state === 'running') {
+                const pick = pickInstantAizuchi();
+                if (pick) {
+                  const tracking = playAizuchiBuffer(aCtx, pick.buffer, ttsAnalyserRef.current, pick.id);
+                  ttsActiveSourcesRef.current.push(tracking);
+                  tracking.source.onended = () => {
+                    ttsActiveSourcesRef.current = ttsActiveSourcesRef.current.filter((s) => s.source !== tracking.source);
+                  };
+                }
               }
             }
           }
