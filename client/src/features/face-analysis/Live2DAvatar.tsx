@@ -63,6 +63,7 @@ type Props = {
   width?: number;
   height?: number;
   isSpeaking?: boolean;
+  isListening?: boolean;
   audioElement?: HTMLAudioElement | null;
   externalAnalyser?: AnalyserNode | null;
   onError?: (error: string) => void;
@@ -77,6 +78,7 @@ export function Live2DAvatar({
   width: propWidth,
   height: propHeight,
   isSpeaking = false,
+  isListening = false,
   audioElement,
   externalAnalyser,
   onError,
@@ -97,6 +99,8 @@ export function Live2DAvatar({
   const initRef = useRef(false);
   const [containerSize, setContainerSize] = useState({ width: propWidth || 300, height: propHeight || 400 });
   const currentExpressionRef = useRef<ExpressionType>('neutral');
+  const isListeningRef = useRef(false);
+  const animTimeRef = useRef(0);
 
   // zoom/offsetY/sizeをrefで保持
   const zoomRef = useRef(zoom);
@@ -108,10 +112,10 @@ export function Live2DAvatar({
   const width = autoSize ? containerSize.width : (propWidth || 300);
   const height = autoSize ? containerSize.height : (propHeight || 400);
 
-  // refを常に最新値に更新
   zoomRef.current = zoom;
   offsetYRef.current = offsetY;
   sizeRef.current = { width, height };
+  isListeningRef.current = isListening;
 
   // コンテナサイズの監視
   useEffect(() => {
@@ -286,6 +290,29 @@ export function Live2DAvatar({
         }
       }
 
+      // 頷きアニメーション: ユーザーが話している間、小さく頷く
+      animTimeRef.current += 1 / 60;
+      if (isListeningRef.current && coreModel) {
+        const t = animTimeRef.current;
+        const nodY = Math.sin(t * Math.PI * 2 / 2.5) * 4;
+        const swayX = Math.sin(t * Math.PI * 2 / 3.7) * 1.5;
+        try {
+          coreModel.setParameterValueById('ParamAngleY', nodY, 0.3);
+          coreModel.setParameterValueById('ParamAngleX', swayX, 0.15);
+        } catch { /* ignore */ }
+      }
+
+      // think表情: 目が上を向いてゆっくり左右に揺れる
+      if (currentExpressionRef.current === 'think' && coreModel) {
+        const t = animTimeRef.current;
+        const eyeY = 0.4 + Math.sin(t * Math.PI * 2 / 4.0) * 0.15;
+        const eyeX = Math.sin(t * Math.PI * 2 / 3.0) * 0.3;
+        try {
+          coreModel.setParameterValueById('ParamEyeBallY', eyeY, 0.5);
+          coreModel.setParameterValueById('ParamEyeBallX', eyeX, 0.5);
+        } catch { /* ignore */ }
+      }
+
       // リップシンク: 外部 analyser（TTS ストリーミング用）を優先、なければ audioElement 経由
       const activeAnalyser = externalAnalyser || analyserRef.current;
       if (isSpeaking && activeAnalyser) {
@@ -316,7 +343,7 @@ export function Live2DAvatar({
     return () => {
       PIXI.Ticker.shared.remove(tickerCallback);
     };
-  }, [isLoaded, isSpeaking, externalAnalyser]);
+  }, [isLoaded, isSpeaking, isListening, externalAnalyser]);
 
   // オーディオ接続
   useEffect(() => {

@@ -995,6 +995,8 @@ function ChatPanel({
   const [ttsProvider, setTtsProvider] = useState<'google' | 'gemini'>('google'); // A/B比較用
   const [ttsVoiceOptions, setTtsVoiceOptions] = useState<{ id: string; name: string }[]>([]);
   const [ttsSpeaking, setTtsSpeaking] = useState(false);
+  const [isUserSpeaking, setIsUserSpeaking] = useState(false);
+  const userSpeakingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [ttsError, setTtsError] = useState<string | null>(null);
   // AIモデル切替（ABテスト用）
   const [geminiModel, setGeminiModel] = useState('gemini-2.5-flash');
@@ -2546,6 +2548,10 @@ function ChatPanel({
         if (rms > AUTO_SEND_RMS_THRESHOLD) {
           lastVoiceActivityRef.current = Date.now();
           scheduleAutoSend();
+          // アバター頷き用: ユーザー発話中フラグ
+          if (!isUserSpeaking) setIsUserSpeaking(true);
+          if (userSpeakingTimerRef.current) clearTimeout(userSpeakingTimerRef.current);
+          userSpeakingTimerRef.current = setTimeout(() => setIsUserSpeaking(false), 200);
         }
 
         const client = wsRef.current;
@@ -2783,6 +2789,7 @@ function ChatPanel({
                 modelPath="/live2d/ran.model3.json"
                 autoSize
                 isSpeaking={ttsSpeaking}
+                isListening={isUserSpeaking && !ttsSpeaking && status !== 'running'}
                 audioElement={ttsAudioRef.current}
                 externalAnalyser={ttsAnalyserRef.current}
                 zoom={avatarZoom}
@@ -2904,8 +2911,8 @@ function ChatPanel({
                       <option value="gemini-3-flash-preview">3 Flash（最新）</option>
                     </select>
                   </div>
-                  {/* 顔分析リアルタイム結果 */}
-                  {faceAnalysisEnabled && (
+                  {/* 顔分析リアルタイム結果（会話中は非表示） */}
+                  {faceAnalysisEnabled && !chatStarted && (
                     <div className="mt-2 pt-2 border-t border-slate-200">
                       <div className="font-medium mb-1">顔分析</div>
                       {faceAnalysisRealtime ? (
@@ -2993,16 +3000,18 @@ function ChatPanel({
             >
               {earOnlyMode ? '耳だけ ON' : '耳だけ'}
             </button>
-            <select
-              value={inputMode}
-              onChange={(e) => setInputMode(e.target.value as typeof inputMode)}
-              className="text-xs border border-slate-300 rounded px-1.5 py-0.5 bg-white"
-            >
-              <option value="auto-smart">自動(賢い)</option>
-              <option value="auto-slow">自動(遅め)</option>
-              <option value="manual">手動</option>
-              <option value="typing">入力のみ</option>
-            </select>
+            {!chatStarted && (
+              <select
+                value={inputMode}
+                onChange={(e) => setInputMode(e.target.value as typeof inputMode)}
+                className="text-xs border border-slate-300 rounded px-1.5 py-0.5 bg-white"
+              >
+                <option value="auto-smart">自動(賢い)</option>
+                <option value="auto-slow">自動(遅め)</option>
+                <option value="manual">手動</option>
+                <option value="typing">入力のみ</option>
+              </select>
+            )}
             {inputMode !== 'typing' && (
               <>
                 <Button
@@ -3024,25 +3033,29 @@ function ChatPanel({
                     送信
                   </Button>
                 )}
-                <label className="flex items-center gap-1 text-slate-500">
-                  <input
-                    type="checkbox"
-                    checked={ttsEnabled}
-                    onChange={(event) => setTtsEnabled(event.target.checked)}
-                    disabled={!ttsSupported}
-                    className="w-3 h-3"
-                  />
-                  音声返答
-                </label>
-                <label className="flex items-center gap-1 text-slate-500">
-                  <input
-                    type="checkbox"
-                    checked={faceAnalysisEnabled}
-                    onChange={(event) => setFaceAnalysisEnabled(event.target.checked)}
-                    className="w-3 h-3"
-                  />
-                  顔分析
-                </label>
+                {!chatStarted && (
+                  <>
+                    <label className="flex items-center gap-1 text-slate-500">
+                      <input
+                        type="checkbox"
+                        checked={ttsEnabled}
+                        onChange={(event) => setTtsEnabled(event.target.checked)}
+                        disabled={!ttsSupported}
+                        className="w-3 h-3"
+                      />
+                      音声返答
+                    </label>
+                    <label className="flex items-center gap-1 text-slate-500">
+                      <input
+                        type="checkbox"
+                        checked={faceAnalysisEnabled}
+                        onChange={(event) => setFaceAnalysisEnabled(event.target.checked)}
+                        className="w-3 h-3"
+                      />
+                      顔分析
+                    </label>
+                  </>
+                )}
               </>
             )}
             {voicePreview && (
@@ -4008,71 +4021,75 @@ ${currentContext || '（ドラフトがありません）'}
       return;
     }
     if (NO_RETENTION_MODE) {
-      setIsInitialSetupOpen(true);
+      setAudioSource('mic');
+      setVoicePrepared(true);
       return;
     }
     try {
-
       const raw = window.sessionStorage.getItem(INITIAL_SETTINGS_STORAGE_KEY);
-
-      if (!raw) {
-
-        setIsInitialSetupOpen(true);
-
-        return;
-
+      if (raw) {
+        const data = JSON.parse(raw);
+        const mode = data?.mode === 'offline' ? 'offline' : 'online';
+        setSessionMode(mode);
+        const facilitator = typeof data?.facilitatorName === 'string' ? data.facilitatorName : '';
+        const talent = typeof data?.talentName === 'string' ? data.talentName : '';
+        const facilitatorIdValue = typeof data?.facilitatorId === 'string' ? data.facilitatorId : '';
+        const talentIdValue = typeof data?.talentId === 'string' ? data.talentId : '';
+        const storedSessionDate =
+          typeof data?.sessionDate === 'string' && data.sessionDate.trim().length > 0
+            ? data.sessionDate.trim()
+            : formatDateInputValue(new Date());
+        setFacilitatorName(facilitator);
+        setTalentName(talent);
+        setFacilitatorId(facilitatorIdValue);
+        setTalentId(talentIdValue);
+        setSessionDate(storedSessionDate);
+        const storedMeetingType =
+          typeof data?.meetingTypeId === 'string' && data.meetingTypeId.trim().length > 0
+            ? data.meetingTypeId.trim()
+            : null;
+        if (storedMeetingType) {
+          setMeetingTypeId((prev) => prev ?? storedMeetingType);
+          try {
+            window.sessionStorage.setItem(MEETING_TYPE_STORAGE_KEY, storedMeetingType);
+          } catch {}
+        }
       }
-
-      const data = JSON.parse(raw);
-
-      const mode = data?.mode === 'offline' ? 'offline' : 'online';
-
-      setSessionMode(mode);
-
+      // ワンタップ開始: ダイアログをスキップし、直接プリチャット画面へ
       setAudioSource('mic');
-
-      const facilitator = typeof data?.facilitatorName === 'string' ? data.facilitatorName : '';
-      const talent = typeof data?.talentName === 'string' ? data.talentName : '';
-      const facilitatorIdValue = typeof data?.facilitatorId === 'string' ? data.facilitatorId : '';
-      const talentIdValue = typeof data?.talentId === 'string' ? data.talentId : '';
-      const storedSessionDate =
-        typeof data?.sessionDate === 'string' && data.sessionDate.trim().length > 0
-          ? data.sessionDate.trim()
-          : formatDateInputValue(new Date());
-      setFacilitatorName(facilitator);
-      setTalentName(talent);
-      setFacilitatorId(facilitatorIdValue);
-      setTalentId(talentIdValue);
-      setSessionDate(storedSessionDate);
-      const storedMeetingType =
-
-        typeof data?.meetingTypeId === 'string' && data.meetingTypeId.trim().length > 0
-
-          ? data.meetingTypeId.trim()
-
-          : null;
-
-      if (storedMeetingType) {
-
-        setMeetingTypeId((prev) => prev ?? storedMeetingType);
-
-        try {
-
-          window.sessionStorage.setItem(MEETING_TYPE_STORAGE_KEY, storedMeetingType);
-
-        } catch {}
-
-      }
-
-      const hasSetup = Boolean(storedMeetingType && facilitator && talent);
-      setIsInitialSetupOpen(!hasSetup);
+      setVoicePrepared(true);
     } catch (error) {
-
       console.warn('[settings] failed to load initial settings', error);
-
-      setIsInitialSetupOpen(true);
+      setAudioSource('mic');
+      setVoicePrepared(true);
     }
   }, []);
+
+  // ワンタップ開始: msAccount確定時に議題提案を自動取得
+  useEffect(() => {
+    if (!msAccount || chatStarted || agendaSuggestion) return;
+    const msAccountId = msAccount.homeAccountId || msAccount.localAccountId || '';
+    if (!msAccountId) return;
+    fetchWithAuth('/api/agenda-suggestion', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        msAccountId,
+        userName: msAccount.name || msAccount.username || '',
+        meetingTypeName: '',
+        sessionDate: new Date().toISOString().slice(0, 10),
+      }),
+    })
+      .then((res) => res.ok ? res.json() : null)
+      .then((data) => {
+        if (data?.suggestion) {
+          setAgendaSuggestion(data.suggestion);
+        }
+      })
+      .catch((err) => {
+        console.warn('[agenda-suggestion] auto-fetch failed', err);
+      });
+  }, [msAccount, chatStarted, agendaSuggestion]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -7411,7 +7428,8 @@ useEffect(() => {
 
       </main>
 
-      {isInitialSetupOpen && (
+      {/* ワンタップ開始: welcomeダイアログを無効化（プリチャット画面で直接スタート） */}
+      {false && isInitialSetupOpen && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-900/70 px-4">
           <div className="w-full max-w-md rounded-3xl bg-white p-8 shadow-2xl shadow-pink-200/40 text-center">
             <p className="text-xs font-semibold uppercase tracking-[0.3em] text-pink-400 mb-2">Welcome</p>
