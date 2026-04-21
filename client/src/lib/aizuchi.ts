@@ -8,7 +8,7 @@ type AizuchiEntry = {
 
 // 即座の相槌に使う安全な短いフレーズのみ
 const INSTANT_IDS = ['un', 'unun', 'hee'];
-const COOLDOWN_MS = 8000;
+const COOLDOWN_MS = 4000;
 
 let entries: AizuchiEntry[] = [];
 let loaded = false;

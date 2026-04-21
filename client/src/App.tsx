@@ -2522,9 +2522,9 @@ function ChatPanel({
         if (rms > AUTO_SEND_RMS_THRESHOLD) {
           aizuchiSpeechFramesRef.current += 1;
           aizuchiSilenceFramesRef.current = 0;
-        } else if (aizuchiSpeechFramesRef.current > 50) {
+        } else if (aizuchiSpeechFramesRef.current > 30) {
           aizuchiSilenceFramesRef.current += 1;
-          if (aizuchiSilenceFramesRef.current === 14 && isAizuchiReady()) {
+          if (aizuchiSilenceFramesRef.current === 8 && isAizuchiReady()) {
             const aCtx = ttsAudioCtxRef.current;
             if (aCtx && aCtx.state === 'running') {
               const pick = pickInstantAizuchi();
