@@ -1181,7 +1181,7 @@ app.post('/api/chat-stream', async (req, res) => {
     const weatherContext = formatWeatherContext(weather);
     const seasonalContext = getSeasonalContext();
 
-    // ミッドセッション要約: 長い会話の古い履歴を要約で圧縮
+    // ミッドセッション要約: 長い会話の古い履歴を要約で圧縮（非ブロック）
     let compressedHistory = history;
     if (history.length > MID_SESSION_SUMMARY_THRESHOLD && genAI) {
       const cacheKey = msAccountId || 'anonymous';
@@ -1190,33 +1190,28 @@ app.post('/api/chat-stream', async (req, res) => {
       const oldMessages = history.slice(0, -recentCount);
       const recentMessages = history.slice(-recentCount);
 
-      let summary = null;
       if (cached && cached.messageCount >= oldMessages.length) {
-        summary = cached.summary;
-      } else {
-        try {
-          const oldText = oldMessages.map(m => `${m.role === 'assistant' ? 'AI' : 'ユーザー'}: ${m.text}`).join('\n');
-          const summaryResult = await genAI.models.generateContent({
-            model: 'gemini-2.0-flash',
-            config: { maxOutputTokens: 300, temperature: 0, thinkingConfig: { thinkingBudget: 0 } },
-            contents: [{ role: 'user', parts: [{ text: `以下の会話の要約を3〜5文で簡潔に書いてください。話題・感情・重要な発言を含めてください。\n\n${oldText}` }] }],
-          });
-          summary = summaryResult?.text?.trim() || null;
-          if (summary) {
-            midSessionSummaryCache.set(cacheKey, { summary, messageCount: oldMessages.length });
-            console.log(`[chat-stream] mid-session summary generated (${oldMessages.length} msgs → ${summary.length} chars)`);
-          }
-        } catch (err) {
-          console.warn('[chat-stream] mid-session summary failed, using full history', err?.message);
-        }
-      }
-
-      if (summary) {
         compressedHistory = [
-          { role: 'user', text: `（これまでの会話の要約: ${summary}）` },
+          { role: 'user', text: `（これまでの会話の要約: ${cached.summary}）` },
           { role: 'assistant', text: '（承知しました。要約を踏まえて会話を続けます）' },
           ...recentMessages,
         ];
+      } else {
+        // キャッシュなし→全履歴で進み、裏で要約生成
+        const oldText = oldMessages.map(m => `${m.role === 'assistant' ? 'AI' : 'ユーザー'}: ${m.text}`).join('\n');
+        genAI.models.generateContent({
+          model: 'gemini-2.0-flash',
+          config: { maxOutputTokens: 300, temperature: 0, thinkingConfig: { thinkingBudget: 0 } },
+          contents: [{ role: 'user', parts: [{ text: `以下の会話の要約を3〜5文で簡潔に書いてください。話題・感情・重要な発言を含めてください。\n\n${oldText}` }] }],
+        }).then(result => {
+          const summary = result?.text?.trim();
+          if (summary) {
+            midSessionSummaryCache.set(cacheKey, { summary, messageCount: oldMessages.length });
+            console.log(`[chat-stream] mid-session summary generated in background (${oldMessages.length} msgs → ${summary.length} chars)`);
+          }
+        }).catch(err => {
+          console.warn('[chat-stream] background mid-session summary failed:', err?.message);
+        });
       }
     }
 
@@ -2419,7 +2414,7 @@ wss.on('connection', async (clientWs, req) => {
           smart_format: true,
           diarize: true,
           utterances: true,
-          utterance_end_ms: 1000,
+          utterance_end_ms: 500,
           filler_words: false,
           // 頭切れ対策: VAD感度とエンドポイント設定
           vad_events: true,

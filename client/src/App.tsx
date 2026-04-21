@@ -2343,7 +2343,17 @@ function ChatPanel({
     void sendChatMessage(transcript);
   }, [sendChatMessage, status]);
 
-  const scheduleAutoSend = useCallback((isRetry = false) => {
+  const looksCompleteSentence = useCallback((text: string) => {
+    return /[。！？…]$/.test(text) ||
+           /[ねよなのかさわぞぜ]$/.test(text) ||
+           /[るたう]$/.test(text) ||
+           /(です|ます|ません|ました|でした)$/.test(text) ||
+           /(ない|たい|しい|かった)$/.test(text) ||
+           /(だよ|だね|だな|かな|よね|のね)$/.test(text) ||
+           text.length >= 25;
+  }, []);
+
+  const scheduleAutoSend = useCallback((isRetry = false, earlyHint = false) => {
     // manual/typingモードでは自動送信しない
     const mode = inputModeRef.current;
     if (mode === 'manual' || mode === 'typing') return;
@@ -2357,7 +2367,9 @@ function ChatPanel({
       autoSendRetryRef.current = 0;
     }
 
-    const silenceMs = mode === 'auto-smart' ? 1500 : 2000;
+    // 確定テキスト＋文末検出で沈黙待ちを短縮
+    const baseSilenceMs = mode === 'auto-smart' ? 1200 : 1800;
+    const silenceMs = earlyHint ? 400 : baseSilenceMs;
 
     autoSendTimerRef.current = window.setTimeout(() => {
       if (voiceStatusRef.current !== 'listening') return;
@@ -2366,24 +2378,9 @@ function ChatPanel({
       const text = finalText || preview;
       if (!text) return;
 
-      // auto-smartモードでは文末検出も行う（ただし最大1回リトライまで＝最大3秒）
+      // auto-smartモードでは文末検出も行う（ただし最大1回��トライまで）
       if (mode === 'auto-smart' && autoSendRetryRef.current < 1) {
-        // 文末パターン:
-        // - 句読点: 。！？…
-        // - 終助詞: ね、よ、な、の、か、さ、わ、ぞ、ぜ
-        // - 動詞終止形: る、た、だ、う
-        // - 丁寧語: です、ます、ません
-        // - 形容詞: い（ただし「〜ない」「〜たい」など）
-        // - 疑問パターン: 〜る？、〜か？（？なしでも）
-        const seemsComplete = /[。！？…]$/.test(text) ||
-                             /[ねよなのかさわぞぜ]$/.test(text) ||
-                             /[るたう]$/.test(text) ||
-                             /(です|ます|ません|ました|でした)$/.test(text) ||
-                             /(ない|たい|しい|かった)$/.test(text) ||
-                             /(だよ|だね|だな|かな|よね|のね)$/.test(text) ||
-                             text.length >= 25;
-        if (!seemsComplete) {
-          // まだ完了してなさそうなので、もう少し待つ（最大1回まで＝計3秒）
+        if (!looksCompleteSentence(text)) {
           autoSendRetryRef.current++;
           scheduleAutoSend(true);
           return;
@@ -2396,7 +2393,7 @@ function ChatPanel({
       aizuchiSilenceFramesRef.current = 0;
       flushVoiceTranscript();
     }, silenceMs);
-  }, [flushVoiceTranscript]);
+  }, [flushVoiceTranscript, looksCompleteSentence]);
 
   // 手動送信（manualモード用）
   const handleManualVoiceSend = useCallback(() => {
@@ -2647,12 +2644,14 @@ function ChatPanel({
               const snapshot = transcriptRef.current.join('');
               voicePreviewRef.current = snapshot;
               setVoicePreview(snapshot);
+              // 確定テキストが文末→沈黙待ちを400msに短縮
+              scheduleAutoSend(false, looksCompleteSentence(snapshot));
             } else {
               const snapshot = transcriptRef.current.join('') + text;
               voicePreviewRef.current = snapshot;
               setVoicePreview(snapshot);
+              scheduleAutoSend();
             }
-            scheduleAutoSend();
           }
         } catch {
           // ignore non-JSON frames
